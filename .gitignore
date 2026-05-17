@@ -41,3 +41,4 @@ build/
 
 
 /.claude/
+/.playwright-mcp/
