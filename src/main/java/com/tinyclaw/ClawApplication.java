@@ -21,22 +21,30 @@ public class ClawApplication {
     private static final ObjectMapper mapper = new ObjectMapper();
 
     // ==========================================
-    // 1. 伪造的大模型 Provider
+    // 1. 升级版 Mock Provider：支持两阶段
     // ==========================================
 
     /**
-     * 模拟大模型的响应：第一轮请求执行 bash，第二轮输出最终结果。
-     * 用于在真实 Provider 实现完成前验证 Main Loop 的健壮性。
+     * 模拟大模型响应：根据传入的工具列表是否为空区分 Phase 1（慢思考）和 Phase 2（行动）。
      */
     static class MockProvider implements LLMProvider {
-        /** 当前轮次计数器，模拟模型的多轮决策 */
+        /** 当前轮次计数器，仅在 Phase 2 时递增 */
         private int turn = 0;
 
         @Override
         public Message generate(List<Message> messages, List<ToolDefinition> availableTools) {
+            // 如果工具列表为空，说明这是引擎发起的 Phase 1: Thinking 阶段
+            if (availableTools.isEmpty()) {
+                return new Message(
+                        Role.ASSISTANT,
+                        "【推理中】目标是检查文件。我不能直接盲猜，我需要先调用 bash 工具执行 ls 命令，看看当前目录下有什么，然后再做定夺。"
+                );
+            }
+
+            // 如果工具列表不为空，说明这是 Phase 2: Action 阶段
             turn++;
             if (turn == 1) {
-                // 第一轮：请求执行 bash ls -la
+                // 第一轮 Action：顺着刚才的 Thinking，精准调用工具
                 JsonNode args;
                 try {
                     // 将 JSON 字符串解析成树形结构的 JsonNode 对象
@@ -46,20 +54,21 @@ public class ClawApplication {
                 }
                 return new Message(
                         Role.ASSISTANT,
-                        "让我来看看当前目录下有什么文件。",
+                        "我要执行我刚才计划的步骤了。",
                         List.of(new ToolCall("call_123", "bash", args))
                 );
             }
-            // 第二轮：输出最终结果，不再请求工具
+
+            // 第二轮 Action：直接总结退出
             return new Message(
                     Role.ASSISTANT,
-                    "我看到了文件列表，里面包含 main.go，任务完成！"
+                    "根据工具返回的结果，我看到了 main.go，任务圆满完成！"
             );
         }
     }
 
     // ==========================================
-    // 2. 伪造的 Tool Registry
+    // 2. Mock Tool Registry
     // ==========================================
 
     /**
@@ -83,7 +92,6 @@ public class ClawApplication {
 
         @Override
         public ToolResult execute(ToolCall call) {
-            // 直接返回一段伪造的终端输出
             return ToolResult.success(
                     call.id(),
                     "-rw-r--r-- 1 user group 234 Oct 24 10:00 main.go\n"
@@ -102,8 +110,8 @@ public class ClawApplication {
         MockProvider p = new MockProvider();
         MockRegistry r = new MockRegistry();
 
-        // 实例化核心引擎
-        AgentEngine eng = new AgentEngine(p, r, workDir);
+        // 实例化核心引擎，开启 EnableThinking = true
+        AgentEngine eng = new AgentEngine(p, r, workDir, true);
 
         // 发起任务指令
         eng.run("帮我检查当前目录的文件");

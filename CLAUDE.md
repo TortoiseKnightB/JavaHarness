@@ -40,26 +40,29 @@ public record Foo(String field1, int field2) {
 | `internal/memory/` | `memory/` | 基于文件系统的记忆存取 |
 | `internal/feishu/` | `feishu/` | 飞书机器人回调 |
 
-## 核心数据流
+## 核心数据流（Two-Stage ReAct）
 
 ```
 用户任务 → ClawApplication
               ↓
-         AgentEngine (MainLoop)
+         AgentEngine.run()
               ↓
-         ContextManager.buildContext()
-              ↓
-         ┌─→ LLMProvider.generate(context)
-         │        ↓
-         │   返回: Answer 或 ToolCall
-         │        ↓
-         │   ToolCall → ToolMiddleware chain
-         │        ↓
-         │   ToolRegistry.execute(toolCall)
-         │        ↓
-         │   Observation 追加到 Context
-         │        ↓
-         └── 循环回 LLMProvider.generate()
+    ┌─────────────────────────────────────────┐
+    │ 每次 Turn:                              │
+    │                                         │
+    │  Phase 1 (Thinking): tools=空列表        │
+    │       ↓                                 │
+    │  🧠 强制输出纯文本推理轨迹                │
+    │       ↓                                 │
+    │  Phase 2 (Action): tools=正常传入        │
+    │       ↓                                 │
+    │  返回: Answer 或 ToolCall                │
+    │       ↓                                 │
+    │  ToolCall → ToolRegistry.execute()      │
+    │       ↓                                 │
+    │  Observation 追加到 Context              │
+    │       ↓                                 │
+    │  循环回 Phase 1 ────────────────────────┘
 ```
 
 ## 项目目录结构
@@ -72,16 +75,14 @@ java-tiny-claw/
 │   ├── ClawApplication.java              # 入口 main()
 │   │
 │   ├── model/                             # 领域模型（record）
-│   │   ├── Message.java                   # 消息（role + content）
-│   │   ├── ToolCall.java                  # 工具调用请求
+│   │   ├── Message.java                   # 消息（role + content + toolCalls）
+│   │   ├── Role.java                      # 消息角色枚举（system/user/assistant）
+│   │   ├── ToolCall.java                  # 工具调用请求（延迟解析参数）
 │   │   ├── ToolResult.java                # 工具执行结果（Observation）
-│   │   ├── AgentConfig.java               # 引擎配置
-│   │   └── ThinkingResult.java            # 慢思考输出
+│   │   └── ToolDefinition.java            # 工具元信息（供模型理解工具有什么用）
 │   │
 │   ├── engine/                            # === 核心引擎层 ===
-│   │   ├── AgentEngine.java               # 引擎门面，组装各模块
-│   │   ├── MainLoop.java                  # ReAct 循环主逻辑
-│   │   └── Thinking.java                  # 独立 Thinking 阶段
+│   │   └── AgentEngine.java               # 引擎核心：Two-Stage ReAct (Phase1 Thinking + Phase2 Action)（已实现）
 │   │
 │   ├── provider/                          # === 大模型适配层 ===
 │   │   ├── LLMProvider.java               # 接口（generate / streamGenerate）
