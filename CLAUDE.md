@@ -7,6 +7,26 @@
 - **零 Agent 框架依赖**：不引入 LangChain4j 等，保持对控制流的完全掌控
 - **基础设施只取所需**：用 Maven 管依赖，不用 Spring Boot（避免 DI 容器成为新的"黑盒框架"）
 - **Java 21**：利用 record、sealed class、Virtual Threads 等现代特性
+- **变量声明**：禁止使用 `var`，所有局部变量必须使用明确的类型声明
+
+## Javadoc 注释规范
+
+- **Record 类**：在类级 javadoc 中使用 `@param` 标签描述各组件，不使用内联 `/** */`
+- **多段落**：类描述的第二段开始使用 `<p>` 分隔
+- **普通类字段**：使用 `/** */` 注释在字段上方
+- **构造方法与公共方法**：使用 `@param` / `@return` 标签
+
+```java
+/**
+ * 第一段：类的简洁描述。
+ * <p>
+ * 第二段：补充说明、设计意图等。
+ *
+ * @param field1 字段1的描述
+ * @param field2 字段2的描述
+ */
+public record Foo(String field1, int field2) {
+}
 
 ## 四层架构映射
 
