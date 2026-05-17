@@ -8,6 +8,7 @@
 - **基础设施只取所需**：用 Maven 管依赖，不用 Spring Boot（避免 DI 容器成为新的"黑盒框架"）
 - **Java 21**：利用 record、sealed class、Virtual Threads 等现代特性
 - **变量声明**：禁止使用 `var`，所有局部变量必须使用明确的类型声明
+- **配置管理**：`application.yml`（kebab-case 命名），通过 `ConfigLoader` 加载，支持 `${ENV_VAR:default}` 占位符
 
 ## Javadoc 注释规范
 
@@ -15,6 +16,7 @@
 - **多段落**：类描述的第二段开始使用 `<p>` 分隔
 - **普通类字段**：使用 `/** */` 注释在字段上方
 - **构造方法与公共方法**：使用 `@param` / `@return` 标签
+- **`@Override` 方法**：同样必须包含 `@param` / `@return`，以 `{@inheritDoc}` 开头，`<p>` 后补充当前实现的特化细节
 
 ```java
 /**
@@ -71,6 +73,9 @@ public record Foo(String field1, int field2) {
 java-tiny-claw/
 ├── pom.xml
 ├── README.md
+├── src/main/resources/
+│   └── application.yml                    # 应用配置（provider + engine）
+│
 ├── src/main/java/com/tinyclaw/
 │   ├── ClawApplication.java              # 入口 main()
 │   │
@@ -84,11 +89,18 @@ java-tiny-claw/
 │   ├── engine/                            # === 核心引擎层 ===
 │   │   └── AgentEngine.java               # 引擎核心：Two-Stage ReAct (Phase1 Thinking + Phase2 Action)（已实现）
 │   │
+│   ├── config/                            # === 配置层 ===
+│   │   ├── AppConfig.java                  # 应用全局配置 record
+│   │   ├── ProviderConfig.java             # Provider 配置
+│   │   ├── EngineConfig.java               # 引擎配置
+│   │   └── ConfigLoader.java               # YAML 加载 + ${ENV:default} 占位符解析
+│   │
 │   ├── provider/                          # === 大模型适配层 ===
-│   │   ├── LLMProvider.java               # 接口（generate / streamGenerate）
-│   │   ├── ProviderFactory.java           # 工厂
-│   │   ├── ClaudeProvider.java            # Anthropic SDK 实现
-│   │   └── OpenAICompatProvider.java      # OpenAI 兼容实现
+│   │   ├── LLMProvider.java               # 接口：generate(messages, tools)
+│   │   ├── AbstractHttpProvider.java      # HTTP 基类：HttpClient + 认证 + 错误处理
+│   │   ├── OpenAICompatProvider.java      # OpenAI 协议适配器（已接入智谱，正常）
+│   │   ├── ClaudeProvider.java            # Anthropic 协议适配器（⚠ 智谱 /v4/messages 返回 404）
+│   │   └── ProviderException.java         # Provider 层异常
 │   │
 │   ├── context/                           # === 上下文工程层 ===
 │   │   ├── ContextManager.java            # 上下文生命周期管理
@@ -129,15 +141,19 @@ java-tiny-claw/
 |--------|------|------|
 | **构建工具** | Maven | 团队已有 Maven 权限配置，Java 生态标准 |
 | **JSON** | Jackson | 事实标准，LLM API 全部 JSON |
-| **HTTP 客户端** | `java.net.http.HttpClient`（JDK 内置） | 无需额外依赖，支持 HTTP/2 和异步 |
+| **HTTP 客户端** | `java.net.http.HttpClient`（JDK 内置） | 零 SDK 依赖，纯 HTTP JSON 调用 LLM API，支持 HTTP/2 和异步 |
 | **并发工具调用** | Virtual Threads（Java 21） | 专栏第 8 讲主题，轻量级并发 |
-| **配置管理** | YAML + 简单 Properties 读取 | 不用 Spring Config，保持极简 |
+| **配置管理** | `application.yml` + `ConfigLoader` | kebab-case 命名，支持 `${ENV_VAR:default}` 占位符 |
 | **日志** | SLF4J + Logback | 标准的门面 + 实现 |
+
+## 已知问题
+
+- **ClaudeProvider**：代码已实现 Anthropic Messages API 格式翻译，但智谱 `/v4/messages` 端点返回 404，需确认正确的 Claude 兼容端点地址。`application.yml` 中 Claude 配置已注释备用。
 
 ## Maven 依赖（最小集）
 
-- `com.fasterxml.jackson:jackson-databind` — JSON
+- `com.fasterxml.jackson:jackson-databind` — JSON 序列化
+- `com.fasterxml.jackson.dataformat:jackson-dataformat-yaml` — YAML 配置解析
 - `org.slf4j:slf4j-api` — 日志门面
 - `ch.qos.logback:logback-classic` — 日志实现
-- `com.anthropic:anthropic-java-sdk` — Claude SDK（可选）
 - `org.junit.jupiter:junit-jupiter` — 测试
