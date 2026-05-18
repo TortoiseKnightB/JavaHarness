@@ -117,9 +117,9 @@ java-tiny-claw/
 │   │   ├── ApprovalGate.java              # 人类在环审批中间件
 │   │   └── builtin/
 │   │       ├── ReadFileTool.java           # 文件读取：workDir 注入 + 路径穿越防护 + 8000 截断（已实现）
-│   │       ├── WriteTool.java             # 文件写入
-│   │       ├── EditTool.java              # 精确编辑（多级模糊匹配）
-│   │       └── BashTool.java              # Shell 命令执行（沙箱）
+│   │       ├── WriteFileTool.java          # 文件写入：路径穿越防护 + 自动创建父目录（已实现）
+│   │       ├── EditTool.java              # 精确编辑（多级模糊匹配）（第 07 讲）
+│   │       └── BashTool.java              # YOLO 核心：4 大驾驭底线（已实现）
 │   │
 │   ├── memory/                            # === 文件系统记忆 ===
 │   │   ├── MemoryStore.java               # 接口
@@ -150,6 +150,7 @@ java-tiny-claw/
 ## 已知问题
 
 - **ClaudeProvider**：代码已实现 Anthropic Messages API 格式翻译，但智谱 `/v4/messages` 端点返回 404，需确认正确的 Claude 兼容端点地址。`application.yml` 中 Claude 配置已注释备用。
+- **BashTool**：超时和内存溢出控制存在问题，当前 `Process.waitFor(30, TimeUnit.SECONDS)` 后 `destroyForcibly()` 可能无法彻底清理子进程，output 字符串无限累积也有 OOM 风险。后续需要加入输出流式读取 + 总长度硬限制 + 进程树彻底销毁。
 
 ## Maven 依赖（最小集）
 
