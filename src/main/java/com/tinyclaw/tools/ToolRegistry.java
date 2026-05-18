@@ -12,12 +12,24 @@ import java.util.List;
 public interface ToolRegistry {
 
     /**
+     * 挂载一个新的工具到系统中。
+     *
+     * @param tool 实现了 Tool 接口的具体工具
+     */
+    void register(Tool tool);
+
+    /**
      * 返回当前系统挂载的所有可用工具的 Schema，供模型参考。
+     *
+     * @return 已挂载工具的 ToolDefinition 列表
      */
     List<ToolDefinition> getAvailableTools();
 
     /**
-     * 实际执行模型请求的工具，并返回物理世界的结果（Observation）。
+     * 路由并执行模型请求的工具，返回物理世界的结果（Observation）。
+     *
+     * @param call 大模型返回的工具调用请求
+     * @return 工具执行结果
      */
     ToolResult execute(ToolCall call);
 }

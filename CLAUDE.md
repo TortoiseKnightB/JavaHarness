@@ -109,13 +109,14 @@ java-tiny-claw/
 │   │   └── EventInjector.java             # 运行时干预提醒注入
 │   │
 │   ├── tools/                             # === 工具与执行层 ===
-│   │   ├── Tool.java                      # 工具接口（name + description + parameters）
-│   │   ├── ToolRegistry.java              # 动态注册与分发
+│   │   ├── Tool.java                      # 工具接口：name() + definition() + execute(JsonNode)（已实现）
+│   │   ├── ToolRegistry.java              # 注册与分发接口（新增 register 方法）（已实现）
+│   │   ├── ToolRegistryImpl.java          # Map<String, Tool> 实现 O(1) 路由分发（已实现）
 │   │   ├── ToolMiddleware.java            # 中间件接口（链式）
 │   │   ├── ToolMiddlewareChain.java       # 中间件链执行器
 │   │   ├── ApprovalGate.java              # 人类在环审批中间件
 │   │   └── builtin/
-│   │       ├── ReadTool.java              # 文件读取
+│   │       ├── ReadFileTool.java           # 文件读取：workDir 注入 + 路径穿越防护 + 8000 截断（已实现）
 │   │       ├── WriteTool.java             # 文件写入
 │   │       ├── EditTool.java              # 精确编辑（多级模糊匹配）
 │   │       └── BashTool.java              # Shell 命令执行（沙箱）

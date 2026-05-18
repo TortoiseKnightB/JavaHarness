@@ -5,109 +5,47 @@ import com.tinyclaw.config.ConfigLoader;
 import com.tinyclaw.config.EngineConfig;
 import com.tinyclaw.config.ProviderConfig;
 import com.tinyclaw.engine.AgentEngine;
-import com.tinyclaw.model.ToolCall;
-import com.tinyclaw.model.ToolDefinition;
-import com.tinyclaw.model.ToolResult;
 import com.tinyclaw.provider.ClaudeProvider;
 import com.tinyclaw.provider.LLMProvider;
 import com.tinyclaw.provider.OpenAICompatProvider;
 import com.tinyclaw.provider.ProviderException;
 import com.tinyclaw.tools.ToolRegistry;
+import com.tinyclaw.tools.ToolRegistryImpl;
+import com.tinyclaw.tools.builtin.ReadFileTool;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.util.List;
-import java.util.Map;
 
 public class ClawApplication {
 
     private static final Logger log = LoggerFactory.getLogger(ClawApplication.class);
-
-    // ==========================================
-    // 临时的 Tool Registry（真实工具将在第 05 讲实现）
-    // ==========================================
-
-    /**
-     * 模拟工具注册表：注册了 bash 和 get_weather 工具，返回伪造的执行结果。
-     * <p>
-     * 用于在真实 Provider 接入后验证两阶段引擎的完整链路。
-     * 真实 Tool Registry 将在后续章节实现后替换。
-     */
-    static class MockRegistry implements ToolRegistry {
-
-        /** 模拟的城市天气数据 */
-        private static final Map<String, String> WEATHER_DATA = Map.of(
-                "北京", "API 返回：今天是晴天，气温 25 度。",
-                "上海", "API 返回：今天多云转阴，气温 22 度。"
-        );
-
-        @Override
-        public List<ToolDefinition> getAvailableTools() {
-            return List.of(
-                    new ToolDefinition(
-                            "bash",
-                            "Execute a shell command in the workspace",
-                            Map.of(
-                                    "type", "object",
-                                    "properties", Map.of(
-                                            "command", Map.of("type", "string", "description", "The command to execute")
-                                    ),
-                                    "required", List.of("command")
-                            )
-                    ),
-                    new ToolDefinition(
-                            "get_weather",
-                            "获取指定城市的当前天气情况。",
-                            Map.of(
-                                    "type", "object",
-                                    "properties", Map.of(
-                                            "city", Map.of("type", "string", "description", "城市名称，如 北京、上海")
-                                    ),
-                                    "required", List.of("city")
-                            )
-                    )
-            );
-        }
-
-        @Override
-        public ToolResult execute(ToolCall call) {
-            if ("bash".equals(call.name())) {
-                return ToolResult.success(
-                        call.id(),
-                        "-rw-r--r-- 1 user group 234 Oct 24 10:00 main.go\n"
-                );
-            }
-            if ("get_weather".equals(call.name())) {
-                String city = call.arguments().path("city").asText("未知");
-                log.info(" -> [Mock 工具执行] 获取 {} 的天气中...", city);
-                String weatherResult = WEATHER_DATA.getOrDefault(city, "API 返回：暂无该城市数据");
-                return ToolResult.success(call.id(), weatherResult);
-            }
-            return ToolResult.error(call.id(), "未知工具: " + call.name());
-        }
-    }
-
-    // ==========================================
-    // 组装运行
-    // ==========================================
 
     public static void main(String[] args) {
         AppConfig config = ConfigLoader.load();
         ProviderConfig providerConfig = config.provider();
         EngineConfig engineConfig = config.engine();
 
-        MockRegistry r = new MockRegistry();
-
-        LLMProvider p = createProvider(providerConfig);
-
+        // 1. 获取工作区物理边界
         String workDir = engineConfig.workDir();
         if (workDir == null || workDir.isEmpty() || ".".equals(workDir)) {
             workDir = System.getProperty("user.dir");
         }
+
+        // 2. 初始化真实的大脑
+        LLMProvider p = createProvider(providerConfig);
+
+        // 3. 初始化真实的 Tool Registry
+        ToolRegistry r = new ToolRegistryImpl();
+
+        // 4. 将真实的 ReadFile 工具挂载到注册表中
+        ReadFileTool readFileTool = new ReadFileTool(workDir);
+        r.register(readFileTool);
+
+        // 5. 实例化核心引擎（简单任务关闭 Thinking 以加快速度）
         AgentEngine eng = new AgentEngine(p, r, workDir, engineConfig.enableThinking());
 
+        // 6. 下发一个必须通过真实工具才能完成的任务
         try {
-            eng.run("我想去北京跑步，帮我查查天气适合吗？");
+            eng.run("请调用工具读取一下当前工作区目录下 hello.txt 文件的内容，并用一句话向我总结它说了什么。");
         } catch (ProviderException e) {
             log.error("引擎运行崩溃: {}", e.getMessage(), e);
             System.exit(1);
