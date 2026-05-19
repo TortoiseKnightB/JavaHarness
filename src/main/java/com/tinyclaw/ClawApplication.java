@@ -12,6 +12,7 @@ import com.tinyclaw.provider.ProviderException;
 import com.tinyclaw.tools.ToolRegistry;
 import com.tinyclaw.tools.ToolRegistryImpl;
 import com.tinyclaw.tools.builtin.BashTool;
+import com.tinyclaw.tools.builtin.EditFileTool;
 import com.tinyclaw.tools.builtin.ReadFileTool;
 import com.tinyclaw.tools.builtin.WriteFileTool;
 import org.slf4j.Logger;
@@ -40,13 +41,16 @@ public class ClawApplication {
         r.register(new ReadFileTool(workDir));
         r.register(new WriteFileTool(workDir));
         r.register(new BashTool(workDir));
+        r.register(new EditFileTool(workDir));
 
-        // 4. 实例化核心引擎（简单任务关闭 Thinking 以极速响应）
+        // 4. 实例化核心引擎
         AgentEngine eng = new AgentEngine(p, r, workDir, engineConfig.enableThinking());
 
-        // 5. 多工具组合测试：检查 Java 版本 → 创建 HelloWorld.java → 编译运行
+        // 5. 测试：读取 server.java → edit_file 修改鉴权逻辑
         try {
-            eng.run("请依次完成以下操作：1. 用 bash 查看当前系统的 python 版本 2. 创建一个 HelloWorld.py 输出 Hello, java-tiny-claw! 3. 用 bash 编译并运行这个文件，向我展示结果。");
+            eng.run("请读取 server.java 文件，找到文件中的 '// TODO: 增加鉴权逻辑' 注释下面的 if 语句块，将它替换为：if (user == null) {\n" +
+                    "            return;\n" +
+                    "        }。");
         } catch (ProviderException e) {
             log.error("引擎运行崩溃: {}", e.getMessage(), e);
             System.exit(1);

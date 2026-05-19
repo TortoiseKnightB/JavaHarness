@@ -118,7 +118,7 @@ java-tiny-claw/
 │   │   └── builtin/
 │   │       ├── ReadFileTool.java           # 文件读取：workDir 注入 + 路径穿越防护 + 8000 截断（已实现）
 │   │       ├── WriteFileTool.java          # 文件写入：路径穿越防护 + 自动创建父目录（已实现）
-│   │       ├── EditTool.java              # 精确编辑（多级模糊匹配）（第 07 讲）
+│   │       ├── EditFileTool.java          # 精确编辑：4级模糊匹配（L1精确→L2换行→L3 Trim→L4逐行去缩进）（已实现）
 │   │       └── BashTool.java              # YOLO 核心：4 大驾驭底线（已实现）
 │   │
 │   ├── memory/                            # === 文件系统记忆 ===
