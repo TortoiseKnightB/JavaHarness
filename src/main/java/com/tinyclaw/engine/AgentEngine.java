@@ -12,16 +12,27 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
 
 /**
  * AgentEngine 是微型 OS 的核心驱动。
  * <p>
  * 只负责维护上下文时间线，严格执行 Two-Stage ReAct 范式：
  * Phase 1 剥夺工具强制规划，Phase 2 恢复工具精准执行。
+ * 工具分发采用 Fork-Join 并发模式：预分配数组 + CompletableFuture + 虚拟线程，无锁线程安全且结果天然保序。
  */
 public class AgentEngine {
 
     private static final Logger log = LoggerFactory.getLogger(AgentEngine.class);
+
+    /**
+     * 虚拟线程执行器，用于并行工具调用的 Fork-Join 分发。
+     * <p>
+     * 虚拟线程极轻量，I/O 密集型操作可瞬间启动数千线程无压力。
+     */
+    private static final Executor VIRTUAL_THREADS = Executors.newVirtualThreadPerTaskExecutor();
 
     /**
      * 默认的系统提示词，在 PromptComposer 接入前占位使用
@@ -129,29 +140,46 @@ public class AgentEngine {
                 break;
             }
 
-            // 4. 执行行动 (Action) 与 获取观察结果 (Observation)
-            log.info("[Engine] 模型请求调用 {} 个工具...", actionResp.toolCalls().size());
+            // 4. Fork-Join 并发执行工具 (Fork-Join 模式)
+            List<ToolCall> toolCalls = actionResp.toolCalls();
+            log.info("[Engine] 模型请求并发调用 {} 个工具...", toolCalls.size());
 
-            for (ToolCall toolCall : actionResp.toolCalls()) {
-                log.info(" -> 🛠️ 执行工具: {}, 参数: {}", toolCall.name(), toolCall.arguments());
+            // 预分配固定长度的数组，每个协程通过专属索引并发写入，无需加锁
+            Message[] observationMsgs = new Message[toolCalls.size()];
+            CompletableFuture<?>[] futures = new CompletableFuture[toolCalls.size()];
 
-                // 通过 Registry 路由并执行底层工具
-                ToolResult result = registry.execute(toolCall);
+            for (int i = 0; i < toolCalls.size(); i++) {
+                final int idx = i;
+                final ToolCall call = toolCalls.get(i);
+                futures[idx] = CompletableFuture.runAsync(() -> {
+                    log.info(" -> [VT-{}] 🛠️ 触发并行执行: {}, 参数: {}", idx, call.name(), call.arguments());
 
-                if (result.isError()) {
-                    log.info(" -> ❌ 工具执行报错: {}", result.output());
-                } else {
-                    log.info(" -> ✅ 工具执行成功 (返回 {} 字节)", result.output().length());
-                }
+                    ToolResult result = registry.execute(call);
 
-                // 将工具的 Observation 追加到 Context，准备进入下一轮
-                Message observationMsg = new Message(
-                        Role.USER,
-                        result.output(),
-                        List.of(),
-                        toolCall.id()
-                );
-                contextHistory.add(observationMsg);
+                    if (result.isError()) {
+                        log.info(" -> [VT-{}] ❌ 工具执行报错: {}", idx, result.output());
+                    } else {
+                        log.info(" -> [VT-{}] ✅ 工具执行成功 (返回 {} 字节)", idx, result.output().length());
+                    }
+
+                    // 线程安全：每个虚拟线程操作预分配数组的不同索引，无需加锁
+                    observationMsgs[idx] = new Message(
+                            Role.USER,
+                            result.output(),
+                            List.of(),
+                            call.id()
+                    );
+                }, VIRTUAL_THREADS);
+            }
+
+            // Join 阻塞等待：主循环挂起，直到所有并发虚拟线程全部执行完毕
+            CompletableFuture.allOf(futures).join();
+
+            log.info("[Engine] 所有并发工具执行完毕，开始聚合观察结果 (Observation)...");
+
+            // 按原始顺序追加到上下文时间线（预分配数组天然保序）
+            for (Message obs : observationMsgs) {
+                contextHistory.add(obs);
             }
 
             // 循环回到开头，模型将带着新加入的 Observation 继续它的下一轮思考...

@@ -29,6 +29,7 @@
  */
 public record Foo(String field1, int field2) {
 }
+```
 
 ## 四层架构映射
 
@@ -42,30 +43,200 @@ public record Foo(String field1, int field2) {
 | `internal/memory/` | `memory/` | 基于文件系统的记忆存取 |
 | `internal/feishu/` | `feishu/` | 飞书机器人回调 |
 
-## 核心数据流（Two-Stage ReAct）
+## 运行时完整流程
+
+### 启动阶段
 
 ```
-用户任务 → ClawApplication
-              ↓
-         AgentEngine.run()
-              ↓
-    ┌─────────────────────────────────────────┐
-    │ 每次 Turn:                              │
-    │                                         │
-    │  Phase 1 (Thinking): tools=空列表        │
-    │       ↓                                 │
-    │  🧠 强制输出纯文本推理轨迹                │
-    │       ↓                                 │
-    │  Phase 2 (Action): tools=正常传入        │
-    │       ↓                                 │
-    │  返回: Answer 或 ToolCall                │
-    │       ↓                                 │
-    │  ToolCall → ToolRegistry.execute()      │
-    │       ↓                                 │
-    │  Observation 追加到 Context              │
-    │       ↓                                 │
-    │  循环回 Phase 1 ────────────────────────┘
+ClawApplication.main()
+  │
+  ├─ 1. ConfigLoader.load("application.yml")
+  │     └─ YAML 解析 → kebab-case → camelCase → ${ENV:default} 占位符解析
+  │     └─ 输出: AppConfig { provider: ProviderConfig, engine: EngineConfig }
+  │
+  ├─ 2. createProvider(providerConfig)
+  │     ├─ type=openai → new OpenAICompatProvider(model, apiKey, baseUrl)
+  │     └─ type=claude → new ClaudeProvider(model, apiKey, baseUrl)
+  │
+  ├─ 3. ToolRegistryImpl.register(Tool) ×4
+  │     ├─ ReadFileTool(workDir)     — 8000 截断 + 路径穿越防护
+  │     ├─ WriteFileTool(workDir)    — 自动创建父目录 + 路径穿越防护
+  │     ├─ BashTool(workDir)         — 30s 超时 + 错误自纠错 + 8000 截断
+  │     └─ EditFileTool(workDir)     — 4 级模糊匹配（L1 精确→L2 换行→L3 Trim→L4 逐行去缩进）
+  │
+  └─ 4. AgentEngine(provider, registry, workDir, enableThinking)
+        └─ eng.run(userPrompt)
 ```
+
+### Two-Stage ReAct 主循环
+
+```
+AgentEngine.run(userPrompt)
+  │
+  ├─ 初始化 contextHistory = [System消息, User消息]
+  │
+  └─ while(true) {  // Main Loop
+        │
+        ├─ availableTools = registry.getAvailableTools()
+        │
+        ├─ [Phase 1: Thinking] — 仅当 enableThinking=true 时执行
+        │     thinkResp = provider.generate(contextHistory, /* tools=空列表 */)
+        │     contextHistory.add(thinkResp)  // 🧠 思考轨迹写入上下文
+        │
+        ├─ [Phase 2: Action]
+        │     actionResp = provider.generate(contextHistory, availableTools)
+        │     contextHistory.add(actionResp)
+        │
+        ├─ if (!actionResp.hasToolCalls()) → break  // 模型认为任务完成
+        │
+        └─ Fork-Join 并发执行：
+              observationMsgs = new Message[toolCalls.size()]  // 预分配数组
+              CompletableFuture.runAsync(registry.execute, VIRTUAL_THREADS) ×N
+              CompletableFuture.allOf(futures).join()  // 等待全部完成
+              按原始顺序追加到 contextHistory  // 数组天然保序
+      }
+```
+
+### Provider 请求翻译链路
+
+```
+OpenAICompatProvider.generate(messages, tools)
+  │
+  ├─ 1. buildRequestBody(messages, tools)
+  │     ├─ SYSTEM  → {"role":"system", "content":"..."}
+  │     ├─ USER    → {"role":"user"} 或 {"role":"tool", "tool_call_id":"..."}
+  │     ├─ ASSISTANT → {"role":"assistant", "content":"...", "tool_calls":[...]}
+  │     └─ tools 非空时挂载 "tools" 字段（支撑两阶段隔离）
+  │
+  ├─ 2. HTTP POST → https://open.bigmodel.cn/api/paas/v4/chat/completions
+  │     └─ Header: Authorization: Bearer {apiKey}
+  │
+  └─ 3. parseResponse(responseBody)
+        ├─ choices[0].message.content → Message.content
+        └─ choices[0].message.tool_calls[].function.{name, arguments} → ToolCall[]
+```
+
+### 工具分发链路
+
+```
+ToolRegistryImpl.execute(toolCall)
+  │
+  ├─ 1. tool = tools.get(toolCall.name())  // Map O(1) 查找
+  │     └─ null → return ToolResult(isError=true, "工具不存在")
+  │
+  ├─ 2. output = tool.execute(toolCall.arguments())
+  │     ├─ ReadFileTool  → Files.readAllBytes + 8000 截断 + 路径穿越防护
+  │     ├─ WriteFileTool → Files.writeString + MkdirAll + 路径穿越防护
+  │     ├─ BashTool → ProcessBuilder(workDir) + 30s 超时 + 错误自纠错 + 8000 截断
+  │     └─ EditFileTool → fuzzyReplace(L1→L2→L3→L4) + 唯一性校验
+  │
+  └─ 3. return ToolResult(id, output, isError)
+        └─ Exception → 捕获后 isError=true，错误信息送给大模型自纠正
+```
+
+## 实现细节
+
+### Two-Stage ReAct 原理
+
+大模型是**自回归**（Auto-regressive）的——Phase 1 调用 `provider.generate(contextHistory, List.of())` 时不传任何工具 Schema，模型别无选择只能输出纯文本推理。这段推理文字存入 `contextHistory` 后，Phase 2 模型看到自己刚才写下的规划，会顺理成章生成对应的 ToolCall。这就是**自回归锚定效应**——用模型自己的输出来约束模型的下一步行为，远比在 Prompt 里写"请先思考"有效。
+
+`enableThinking` 开关：简单任务（如查天气）关闭以省 Token 和延迟；复杂任务（如重构代码）开启以强制深度规划。
+
+### 工具防御机制
+
+**ReadFileTool / WriteFileTool — 路径穿越防护**：
+
+```
+Path resolved = Paths.get(workDir).resolve(relativePath).normalize();
+if (!resolved.startsWith(Paths.get(workDir).normalize()))
+    → throw SecurityException  // 拦截 ../../etc/passwd
+```
+
+- ReadFileTool：`Files.readAllBytes` 后 8000 字符硬截断 + `...[截断]` 标记
+- WriteFileTool：`Files.createDirectories(parent)` 自动创建父目录 + `Files.writeString` 写入
+
+**BashTool — 4 大驾驭底线**：
+
+| 底线 | 机制 | 目的 |
+|------|------|------|
+| 工作区约束 | `ProcessBuilder.directory(workDir)` | 限制命令执行范围 |
+| 超时控制 | `process.waitFor(30, SECONDS)` → 超时 `destroyForcibly()` + 返回警告 | 防止 `top`、常驻服务卡死 |
+| 错误自纠错 | `exitCode != 0` 不抛异常，将 stderr/stdout 拼成字符串返回 | 让大模型自己分析报错并纠正 |
+| 长度截断 | 8000 字符硬截断 + 截断提示 | 防 Context OOM |
+
+**EditFileTool — 4 级模糊匹配链**（吸收大模型"缩进幻觉"）：
+
+| 级别 | 策略 | 条件 | 结果 |
+|------|------|------|------|
+| L1 | 精确匹配 `countOccurrences()` | count==1 | `replaceFirst()` 直接替换 |
+| L1 | 精确匹配 | count>1 | 报错"匹配到 N 处，请提供更多上下文" |
+| L2 | `\r\n` → `\n` 换行符归一化 | 归一化后 count==1 | 替换 |
+| L3 | `trim()` 忽略首尾空白 | Trim 后 count==1 | 替换 |
+| L4 | `lineByLineReplace()` 逐行去缩进 | — | 见下方 |
+
+`lineByLineReplace()` 滑动窗口流程：
+1. 原文件按 `\n` 切分为 `contentLines`
+2. oldText 按 `\n` 切分，每行 `strip()` 去首尾空白
+3. 滑动窗口遍历 `contentLines[i..i+len(oldLines)]`，每行 `strip()` 后与 oldLines 逐行比对
+4. **唯一性校验**：matchCount==0 → 报错"未找到，请 read_file 确认"；>1 → 报错"匹配到 N 处，请提供更多上下文"
+5. matchCount==1 → 将匹配到的原始行范围整体替换为 newText
+
+### Provider 翻译关键设计
+
+**ToolCallID 必须携带**：User 消息带 `tool_call_id` 时，OpenAI 协议翻译为 `role: "tool"`，Claude 协议翻译为 `tool_result` block。这是维系大模型推理链条不被中断的关键——缺少它，模型会丢失工具调用→结果的关联。
+
+**Arguments 延迟解析**：`ToolCall.arguments` 使用 `JsonNode`，Main Loop 和 Registry 完全不拆包不关心参数内容，将反序列化责任交给各具体工具的 `execute()` 内部。这实现了极致解耦——Registry 加新工具时不需要改任何一行分发代码。
+
+**authHeaders() 模板方法**：`AbstractHttpProvider` 默认返回 `Authorization: Bearer {apiKey}`（OpenAI 协议），`ClaudeProvider` 覆盖为 `x-api-key` + `anthropic-version: 2023-06-01`。
+
+### ToolRegistryImpl 路由分发
+
+- **Map O(1) 查找**：`LinkedHashMap<String, Tool>` 保持注册顺序，按 name 精确路由
+- **模型幻觉处理**：工具不存在 → 返回 `ToolResult(isError=true)`，不崩溃，让模型看到错误后自纠正
+- **异常捕获**：`tool.execute()` 抛异常 → Registry 捕获转为 `isError=true`，错误信息原样返回
+
+### ConfigLoader 占位符解析
+
+`${ZHIPU_API_KEY:default_value}` 解析流程：
+1. 正则 `\$\{(\w+)(?::([^}]*))?\}` 匹配占位符
+2. `System.getenv(ENV_VAR)` 读取环境变量，不存在则用默认值
+3. kebab-case → camelCase：`ObjectMapper.setPropertyNamingStrategy(KEBAB_CASE)` + 先写回 JSON 再 `readValue` 迂回实现（因为 `treeToValue` 不支持命名策略）
+
+### Fork-Join 并发工具分发
+
+**独立性假设**：大模型在同一 Turn 中并行下发的多个 ToolCall，引擎假设它们互不依赖——如果存在强依赖，模型会分两个 Turn 完成。引擎的职责是无脑并行，最大化 I/O 性能。
+
+**实现**：
+
+```
+预分配 Message[toolCalls.size()]               // 每个 idx 坑位对应一个 ToolCall
+   ↓
+CompletableFuture.runAsync(task, VIRTUAL_THREADS) ×N  // Fork: N 个虚拟线程同时执行
+   ↓
+CompletableFuture.allOf(futures).join()         // Join: 阻塞等待全部完成
+   ↓
+按原始顺序遍历 observationMsgs 追加到 contextHistory  // 数组天然保序
+```
+
+**设计要点**：
+
+| 要点 | 机制 | 与 Go 对应 |
+|------|------|-----------|
+| 无锁线程安全 | 预分配数组，每个虚拟线程通过专属 idx 并发写入 | `make([]Message, len)` |
+| 等待全部完成 | `CompletableFuture.allOf().join()` | `sync.WaitGroup` / `wg.Wait()` |
+| 结果天然保序 | 数组索引即为 ToolCall 原始顺序 | 完全一致 |
+| 闭包传参 | `final int idx` 捕获，防止循环变量陷阱 | `go func(idx int, call ToolCall)` |
+
+**适用范围**：当前坚持独立性假设（所有 ToolCall 无脑并行）。场景建议——探索阶段（read_file / grep 等只读）并发加速；执行阶段（edit / write / bash 等写操作）如有依赖建议分 Turn 执行。
+
+### YOLO 哲学
+
+本地开发环境**全权信任大模型**，bash 不加黑名单、不做静态正则拦截。理由：
+- 只要允许 Agent 执行代码，静态黑名单总能被绕过（变量拼接、写脚本再执行）
+- 过度权限校验是"安全剧场"——看似安全实则对真实风险帮助有限
+- **信任在业务层，拦截在物理层**（超时 + 截断 + 路径约束）
+- 出错了交给 Git 回滚
+- 线上运维场景会在后续章节引入 Human-in-the-loop 人工审批
 
 ## 项目目录结构
 
@@ -87,7 +258,7 @@ java-tiny-claw/
 │   │   └── ToolDefinition.java            # 工具元信息（供模型理解工具有什么用）
 │   │
 │   ├── engine/                            # === 核心引擎层 ===
-│   │   └── AgentEngine.java               # 引擎核心：Two-Stage ReAct (Phase1 Thinking + Phase2 Action)（已实现）
+│   │   └── AgentEngine.java               # 引擎核心：Two-Stage ReAct + Fork-Join 并发工具分发（已实现）
 │   │
 │   ├── config/                            # === 配置层 ===
 │   │   ├── AppConfig.java                  # 应用全局配置 record
@@ -102,7 +273,7 @@ java-tiny-claw/
 │   │   ├── ClaudeProvider.java            # Anthropic 协议适配器（⚠ 智谱 /v4/messages 返回 404）
 │   │   └── ProviderException.java         # Provider 层异常
 │   │
-│   ├── context/                           # === 上下文工程层 ===
+│   ├── context/                           # === 上下文工程层（后续章节） ===
 │   │   ├── ContextManager.java            # 上下文生命周期管理
 │   │   ├── PromptComposer.java            # 动态拼装系统提示（读取 AGENTS.md）
 │   │   ├── Compactor.java                 # Token 阶梯压缩策略
@@ -112,24 +283,24 @@ java-tiny-claw/
 │   │   ├── Tool.java                      # 工具接口：name() + definition() + execute(JsonNode)（已实现）
 │   │   ├── ToolRegistry.java              # 注册与分发接口（新增 register 方法）（已实现）
 │   │   ├── ToolRegistryImpl.java          # Map<String, Tool> 实现 O(1) 路由分发（已实现）
-│   │   ├── ToolMiddleware.java            # 中间件接口（链式）
-│   │   ├── ToolMiddlewareChain.java       # 中间件链执行器
-│   │   ├── ApprovalGate.java              # 人类在环审批中间件
+│   │   ├── ToolMiddleware.java            # 中间件接口（链式）（后续）
+│   │   ├── ToolMiddlewareChain.java       # 中间件链执行器（后续）
+│   │   ├── ApprovalGate.java              # 人类在环审批中间件（后续）
 │   │   └── builtin/
 │   │       ├── ReadFileTool.java           # 文件读取：workDir 注入 + 路径穿越防护 + 8000 截断（已实现）
 │   │       ├── WriteFileTool.java          # 文件写入：路径穿越防护 + 自动创建父目录（已实现）
 │   │       ├── EditFileTool.java          # 精确编辑：4级模糊匹配（L1精确→L2换行→L3 Trim→L4逐行去缩进）（已实现）
 │   │       └── BashTool.java              # YOLO 核心：4 大驾驭底线（已实现）
 │   │
-│   ├── memory/                            # === 文件系统记忆 ===
+│   ├── memory/                            # === 文件系统记忆（后续章节） ===
 │   │   ├── MemoryStore.java               # 接口
 │   │   └── FileMemoryStore.java           # 读写 TODO.md / PLAN.md / context.md
 │   │
-│   └── feishu/                            # === 飞书集成 ===
+│   └── feishu/                            # === 飞书集成（后续章节） ===
 │       ├── FeishuBot.java                 # Webhook 回调处理
 │       └── FeishuCardBuilder.java         # 审批卡片构建
 │
-├── src/test/java/com/tinyclaw/
+├── src/test/java/com/tinyclaw/           #（待实现）
 │   ├── engine/MainLoopTest.java
 │   ├── provider/ClaudeProviderTest.java
 │   ├── context/CompactorTest.java
@@ -143,7 +314,7 @@ java-tiny-claw/
 | **构建工具** | Maven | 团队已有 Maven 权限配置，Java 生态标准 |
 | **JSON** | Jackson | 事实标准，LLM API 全部 JSON |
 | **HTTP 客户端** | `java.net.http.HttpClient`（JDK 内置） | 零 SDK 依赖，纯 HTTP JSON 调用 LLM API，支持 HTTP/2 和异步 |
-| **并发工具调用** | Virtual Threads（Java 21） | 专栏第 8 讲主题，轻量级并发 |
+| **并发工具调用** | `CompletableFuture` + Virtual Threads + 预分配数组 | Fork-Join 模式：每个 ToolCall 由独立虚拟线程执行，预分配数组通过索引并发写入实现无锁线程安全且结果天然保序（已实现） |
 | **配置管理** | `application.yml` + `ConfigLoader` | kebab-case 命名，支持 `${ENV_VAR:default}` 占位符 |
 | **日志** | SLF4J + Logback | 标准的门面 + 实现 |
 

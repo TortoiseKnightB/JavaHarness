@@ -46,11 +46,9 @@ public class ClawApplication {
         // 4. 实例化核心引擎
         AgentEngine eng = new AgentEngine(p, r, workDir, engineConfig.enableThinking());
 
-        // 5. 测试：读取 server.java → edit_file 修改鉴权逻辑
+        // 5. 并行工具调用测试：同时读取 a.txt b.txt c.txt
         try {
-            eng.run("请读取 server.java 文件，找到文件中的 '// TODO: 增加鉴权逻辑' 注释下面的 if 语句块，将它替换为：if (user == null) {\n" +
-                    "            return;\n" +
-                    "        }。");
+            eng.run("我当前目录下有 a.txt, b.txt, c.txt 三个文件。为了节省时间，请你同时一次性读取这三个文件，并将它们的内容综合起来，告诉我它们分别记录了什么领域的信息。");
         } catch (ProviderException e) {
             log.error("引擎运行崩溃: {}", e.getMessage(), e);
             System.exit(1);
