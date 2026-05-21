@@ -5,5 +5,7 @@ package com.tinyclaw.config;
  */
 public record AppConfig(
         ProviderConfig provider,
-        EngineConfig engine) {
+        EngineConfig engine,
+        ServerConfig server,
+        FeishuConfig feishu) {
 }

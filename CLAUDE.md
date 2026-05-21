@@ -258,12 +258,17 @@ java-tiny-claw/
 │   │   └── ToolDefinition.java            # 工具元信息（供模型理解工具有什么用）
 │   │
 │   ├── engine/                            # === 核心引擎层 ===
-│   │   └── AgentEngine.java               # 引擎核心：Two-Stage ReAct + Fork-Join 并发工具分发（已实现）
+│   │   ├── AgentEngine.java               # 引擎核心：Two-Stage ReAct + Fork-Join 并发工具分发（已实现）
+│   │   ├── Reporter.java                  # I/O 解耦接口：onThinking/onToolCall/onToolResult/onMessage（已实现）
+│   │   ├── ConsoleReporter.java           # CLI 模式终端输出实现（已实现）
+│   │   └── FeishuReporter.java            # 飞书模式：调用 REST API 发消息（已实现）
 │   │
 │   ├── config/                            # === 配置层 ===
 │   │   ├── AppConfig.java                  # 应用全局配置 record
 │   │   ├── ProviderConfig.java             # Provider 配置
 │   │   ├── EngineConfig.java               # 引擎配置
+│   │   ├── ServerConfig.java               # 启动模式配置（cli/feishu）
+│   │   ├── FeishuConfig.java              # 飞书 SDK 配置
 │   │   └── ConfigLoader.java               # YAML 加载 + ${ENV:default} 占位符解析
 │   │
 │   ├── provider/                          # === 大模型适配层 ===
@@ -296,9 +301,8 @@ java-tiny-claw/
 │   │   ├── MemoryStore.java               # 接口
 │   │   └── FileMemoryStore.java           # 读写 TODO.md / PLAN.md / context.md
 │   │
-│   └── feishu/                            # === 飞书集成（后续章节） ===
-│       ├── FeishuBot.java                 # Webhook 回调处理
-│       └── FeishuCardBuilder.java         # 审批卡片构建
+│   └── feishu/                            # === 飞书集成（已实现） ===
+│       └── FeishuBot.java                 # WebSocket 长连接客户端 + 事件分发（已实现）
 │
 ├── src/test/java/com/tinyclaw/           #（待实现）
 │   ├── engine/MainLoopTest.java
@@ -329,4 +333,13 @@ java-tiny-claw/
 - `com.fasterxml.jackson.dataformat:jackson-dataformat-yaml` — YAML 配置解析
 - `org.slf4j:slf4j-api` — 日志门面
 - `ch.qos.logback:logback-classic` — 日志实现
+- `com.larksuite.oapi:oapi-sdk:2.5.3` — 飞书 Java SDK
 - `org.junit.jupiter:junit-jupiter` — 测试
+
+## 参考资料
+
+- 飞书服务端 SDK 概述：<https://open.feishu.cn/document/server-docs/server-side-sdk>
+- 飞书 Java SDK 开发前准备（Maven 坐标）：<https://open.feishu.cn/document/server-side-sdk/java-sdk-guide/preparations>
+- 飞书 Java SDK 长连接处理事件（WebSocket）：<https://open.feishu.cn/document/server-side-sdk/java-sdk-guide/handle-events>
+- 飞书 Java SDK 调用服务端 API（发消息）：<https://open.feishu.cn/document/server-side-sdk/java-sdk-guide/invoke-server-api>
+- 飞书 Java SDK 场景示例：<https://open.feishu.cn/document/server-side-sdk/java-sdk-guide/scenario-example>

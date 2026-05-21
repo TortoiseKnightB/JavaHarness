@@ -78,8 +78,10 @@ public class AgentEngine {
      * 启动 Agent 的生命周期，执行 Two-Stage ReAct 循环直到任务完成。
      *
      * @param userPrompt 用户输入的任务描述
+     * @param reporter   输出报告器，为 null 时退化为 ConsoleReporter
      */
-    public void run(String userPrompt) {
+    public void run(String userPrompt, Reporter reporter) {
+        final Reporter rep = reporter != null ? reporter : new ConsoleReporter();
         log.info("[Engine] 引擎启动，锁定工作区: {}", workDir);
         log.info("[Engine] 慢思考模式 (Thinking Phase): {}", enableThinking);
 
@@ -103,6 +105,7 @@ public class AgentEngine {
             // ====================================================================
             if (enableThinking) {
                 log.info("[Engine][Phase 1] 剥夺工具访问权，强制进入慢思考与规划阶段...");
+                rep.onThinking();
 
                 // 核心机制：传入空的工具列表！
                 // 大模型看不到任何 JSON Schema，被迫只能输出纯文本的思考过程。
@@ -110,7 +113,7 @@ public class AgentEngine {
 
                 // 如果模型输出了思考过程，将其作为 Assistant 消息追加到上下文中
                 if (thinkResp.content() != null && !thinkResp.content().isEmpty()) {
-                    System.out.println("🧠 [内部思考 Trace]: " + thinkResp.content());
+                    rep.onMessage("🧠 [内部思考 Trace]: " + thinkResp.content());
                     contextHistory.add(thinkResp);
                 }
             }
@@ -125,9 +128,9 @@ public class AgentEngine {
             Message actionResp = provider.generate(contextHistory, availableTools);
             contextHistory.add(actionResp);
 
-            // 如果模型回复了纯文本，打印出来（对外回复）
+            // 如果模型回复了纯文本，通过 Reporter 输出（对外回复）
             if (actionResp.content() != null && !actionResp.content().isEmpty()) {
-                System.out.println("🤖 [对外回复]: " + actionResp.content());
+                rep.onMessage(actionResp.content());
             }
 
             // ====================================================================
@@ -152,15 +155,11 @@ public class AgentEngine {
                 final int idx = i;
                 final ToolCall call = toolCalls.get(i);
                 futures[idx] = CompletableFuture.runAsync(() -> {
-                    log.info(" -> [VT-{}] 🛠️ 触发并行执行: {}, 参数: {}", idx, call.name(), call.arguments());
+                    rep.onToolCall(call.name(), call.arguments().toString());
 
                     ToolResult result = registry.execute(call);
 
-                    if (result.isError()) {
-                        log.info(" -> [VT-{}] ❌ 工具执行报错: {}", idx, result.output());
-                    } else {
-                        log.info(" -> [VT-{}] ✅ 工具执行成功 (返回 {} 字节)", idx, result.output().length());
-                    }
+                    rep.onToolResult(call.name(), result.output(), result.isError());
 
                     // 线程安全：每个虚拟线程操作预分配数组的不同索引，无需加锁
                     observationMsgs[idx] = new Message(

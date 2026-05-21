@@ -4,7 +4,11 @@ import com.tinyclaw.config.AppConfig;
 import com.tinyclaw.config.ConfigLoader;
 import com.tinyclaw.config.EngineConfig;
 import com.tinyclaw.config.ProviderConfig;
+import com.tinyclaw.config.ServerConfig;
 import com.tinyclaw.engine.AgentEngine;
+import com.tinyclaw.engine.ConsoleReporter;
+import com.tinyclaw.feishu.FeishuBot;
+import com.tinyclaw.config.FeishuConfig;
 import com.tinyclaw.provider.ClaudeProvider;
 import com.tinyclaw.provider.LLMProvider;
 import com.tinyclaw.provider.OpenAICompatProvider;
@@ -26,6 +30,7 @@ public class ClawApplication {
         AppConfig config = ConfigLoader.load();
         ProviderConfig providerConfig = config.provider();
         EngineConfig engineConfig = config.engine();
+        ServerConfig serverConfig = config.server();
 
         // 1. 获取工作区物理边界
         String workDir = engineConfig.workDir();
@@ -46,13 +51,36 @@ public class ClawApplication {
         // 4. 实例化核心引擎
         AgentEngine eng = new AgentEngine(p, r, workDir, engineConfig.enableThinking());
 
-        // 5. 并行工具调用测试：同时读取 a.txt b.txt c.txt
+        // 5. 根据配置的模式启动
+        String mode = serverConfig.mode();
+        if ("feishu".equals(mode)) {
+            startFeishuMode(eng, config.feishu());
+        } else {
+            startCliMode(eng);
+        }
+    }
+
+    /**
+     * CLI 模式：从命令行执行一次任务。
+     */
+    private static void startCliMode(AgentEngine eng) {
+        log.info("启动模式: CLI");
         try {
-            eng.run("我当前目录下有 a.txt, b.txt, c.txt 三个文件。为了节省时间，请你同时一次性读取这三个文件，并将它们的内容综合起来，告诉我它们分别记录了什么领域的信息。");
+            eng.run("我当前目录下有 a.txt, b.txt, c.txt 三个文件。为了节省时间，请你同时一次性读取这三个文件，并将它们的内容综合起来，告诉我它们分别记录了什么领域的信息。",
+                    new ConsoleReporter());
         } catch (ProviderException e) {
             log.error("引擎运行崩溃: {}", e.getMessage(), e);
             System.exit(1);
         }
+    }
+
+    /**
+     * 飞书模式：建立 WebSocket 长连接，挂起主线程等待消息。
+     */
+    private static void startFeishuMode(AgentEngine eng, FeishuConfig feishuConfig) {
+        log.info("启动模式: Feishu (WebSocket 长连接)");
+        FeishuBot bot = new FeishuBot(eng, feishuConfig);
+        bot.start();  // 阻塞直到连接断开
     }
 
     /**
