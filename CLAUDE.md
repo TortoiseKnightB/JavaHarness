@@ -134,6 +134,34 @@ ToolRegistryImpl.execute(toolCall)
         └─ Exception → 捕获后 isError=true，错误信息送给大模型自纠正
 ```
 
+### 飞书远程调用链路
+
+```
+ClawApplication
+  │
+  ├─ 1. 创建 AgentEngine
+  │
+  ├─ 2. 创建 FeishuBot（注入 AgentEngine）
+  │     └─ FeishuBot.start()
+  │           ├─ REST Client（App ID + App Secret 认证）→ 用于发送消息
+  │           └─ WebSocket Client（App ID + App Secret 认证）→ 连接飞书事件服务器
+  │
+  ├─ 3. WebSocket 长连接就绪，挂起等待事件推送
+  │
+  ├─ 4. 用户在飞书聊天中 @机器人 发消息
+  │     └─ 飞书服务器通过 WebSocket 推送消息事件 → FeishuBot
+  │           ├─ 解析 chatId + 文本内容
+  │           └─ 虚拟线程异步 → AgentEngine.run
+  │                 ├─ FeishuReporter.onThinking()  → 飞书发送 "🧠 正在深度思考..."
+  │                 ├─ FeishuReporter.onToolCall()  → 飞书发送 "🛠️ 调用工具..."
+  │                 ├─ FeishuReporter.onToolResult() → 飞书发送 "✅/❌ 执行结果"
+  │                 └─ FeishuReporter.onMessage()   → 飞书发送最终回复
+  │
+  └─ 5. 回复消息通过飞书 REST API 实时发送到用户聊天窗口
+```
+
+> **一句话**：FeishuBot 通过 WebSocket 长连接订阅飞书消息 → 收到消息异步拉起 AgentEngine → AgentEngine 通过 FeishuReporter 将思考、工具调用、最终回答实时回传飞书。
+
 ## 实现细节
 
 ### Two-Stage ReAct 原理
