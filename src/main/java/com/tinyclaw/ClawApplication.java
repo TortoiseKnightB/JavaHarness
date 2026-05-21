@@ -66,7 +66,7 @@ public class ClawApplication {
     private static void startCliMode(AgentEngine eng) {
         log.info("启动模式: CLI");
         try {
-            eng.run("我当前目录下有 a.txt, b.txt, c.txt 三个文件。为了节省时间，请你同时一次性读取这三个文件，并将它们的内容综合起来，告诉我它们分别记录了什么领域的信息。",
+            eng.run("我需要在当前目录下新建一个 ping.java，提供一个简单的 http ping 接口。 写完之后，帮我把代码用 git 提交一下。",
                     new ConsoleReporter());
         } catch (ProviderException e) {
             log.error("引擎运行崩溃: {}", e.getMessage(), e);

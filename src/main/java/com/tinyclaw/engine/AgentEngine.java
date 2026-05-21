@@ -1,5 +1,6 @@
 package com.tinyclaw.engine;
 
+import com.tinyclaw.context.PromptComposer;
 import com.tinyclaw.model.Message;
 import com.tinyclaw.model.Role;
 import com.tinyclaw.model.ToolCall;
@@ -35,12 +36,6 @@ public class AgentEngine {
     private static final Executor VIRTUAL_THREADS = Executors.newVirtualThreadPerTaskExecutor();
 
     /**
-     * 默认的系统提示词，在 PromptComposer 接入前占位使用
-     */
-    private static final String DEFAULT_SYSTEM_PROMPT =
-            "You are java-tiny-claw, an expert coding assistant. You have full access to tools in the workspace.";
-
-    /**
      * 大模型适配器：负责与底层模型 API 通信
      */
     private final LLMProvider provider;
@@ -62,6 +57,11 @@ public class AgentEngine {
     private final boolean enableThinking;
 
     /**
+     * 提示词组裝器：根据工作区环境动态生成 System Prompt
+     */
+    private final PromptComposer composer;
+
+    /**
      * @param provider       大模型适配器
      * @param registry       工具注册表
      * @param workDir        工作区物理边界目录
@@ -72,6 +72,7 @@ public class AgentEngine {
         this.registry = registry;
         this.workDir = workDir;
         this.enableThinking = enableThinking;
+        this.composer = new PromptComposer(workDir);
     }
 
     /**
@@ -87,7 +88,7 @@ public class AgentEngine {
 
         // 1. 初始化会话的 Context (上下文内存)
         List<Message> contextHistory = new ArrayList<>();
-        contextHistory.add(new Message(Role.SYSTEM, DEFAULT_SYSTEM_PROMPT));
+        contextHistory.add(composer.build());
         contextHistory.add(new Message(Role.USER, userPrompt));
 
         int turnCount = 0;

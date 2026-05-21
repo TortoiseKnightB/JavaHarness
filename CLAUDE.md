@@ -65,15 +65,20 @@ ClawApplication.main()
   │     └─ EditFileTool(workDir)     — 4 级模糊匹配（L1 精确→L2 换行→L3 Trim→L4 逐行去缩进）
   │
   └─ 4. AgentEngine(provider, registry, workDir, enableThinking)
-        └─ eng.run(userPrompt)
+        ├─ 内部创建 PromptComposer(workDir)  // 【第10讲】动态组装 System Prompt
+        └─ eng.run(userPrompt, reporter)
 ```
 
 ### Two-Stage ReAct 主循环
 
 ```
-AgentEngine.run(userPrompt)
+AgentEngine.run(userPrompt, reporter)
   │
-  ├─ 初始化 contextHistory = [System消息, User消息]
+  ├─ 初始化 contextHistory = [composer.build(), User消息]
+  │     └─ composer.build() 三板斧：
+  │         1. CORE_KERNEL — 极简内核：身份 + 6 条红线纪律
+  │         2. AGENTS.md   — 项目专属规范（可选，不存在则跳过）
+  │         3. SkillLoader.loadAll() — .claw/skills/ 下所有 SKILL.md（可选）
   │
   └─ while(true) {  // Main Loop
         │
@@ -169,6 +174,25 @@ ClawApplication
 大模型是**自回归**（Auto-regressive）的——Phase 1 调用 `provider.generate(contextHistory, List.of())` 时不传任何工具 Schema，模型别无选择只能输出纯文本推理。这段推理文字存入 `contextHistory` 后，Phase 2 模型看到自己刚才写下的规划，会顺理成章生成对应的 ToolCall。这就是**自回归锚定效应**——用模型自己的输出来约束模型的下一步行为，远比在 Prompt 里写"请先思考"有效。
 
 `enableThinking` 开关：简单任务（如查天气）关闭以省 Token 和延迟；复杂任务（如重构代码）开启以强制深度规划。
+
+### 上下文工程体系：动态 System Prompt 组装（第10讲）
+
+System Prompt 不应是硬编码的字符串常量，而应是**模块化"编译"和"动态链接"的操作系统内核**。通过 `PromptComposer` 动态拼装 System Prompt，替代引擎中原先的 `DEFAULT_SYSTEM_PROMPT` 硬编码常量。
+
+**三层分层加载策略**（借鉴 OpenClaw）：
+
+| 层级 | 来源 | 说明 |
+|------|------|------|
+| L1 极简内核 | 硬编码在 `PromptComposer` 中 | 身份认知 + 纪律红线，<1000 Tokens |
+| L2 工作区守则 | `{workDir}/AGENTS.md` | 由人类在工作区维护的项目专属规范，不存在则跳过 |
+| L3 技能外挂 | `{workDir}/.claw/skills/*/SKILL.md` | 符合 Agent Skills 规范的领域 SOP 知识包，不存在则跳过 |
+
+**Agent Skills 规范**：每个技能封装为 `.claw/skills/{name}/SKILL.md`，以 YAML Frontmatter（`name` + `description`）开头，后跟 Markdown 执行指令正文。`SkillLoader` 负责扫描和解析，手写字符串切割实现 YAML Frontmatter 提取，零第三方依赖。
+
+**设计哲学**：
+- **状态外部化**：将易变的业务规范剥离出核心引擎代码，交由人类在工作区以文件形式维护
+- **静默降级**：AGENTS.md 或 skills 目录不存在时，引擎正常工作，不抛异常
+- **渐进式暴露**：当前实现全量加载，后续演进方向——启动时只放技能元数据，大模型按需调用工具精确加载正文
 
 ### 工具防御机制
 
@@ -306,9 +330,11 @@ java-tiny-claw/
 │   │   ├── ClaudeProvider.java            # Anthropic 协议适配器（⚠ 智谱 /v4/messages 返回 404）
 │   │   └── ProviderException.java         # Provider 层异常
 │   │
-│   ├── context/                           # === 上下文工程层（后续章节） ===
+│   ├── context/                           # === 上下文工程层 ===
+│   │   ├── Skill.java                      # 技能领域 record：name + description + body（第10讲已实现）
+│   │   ├── SkillLoader.java                # 扫描 .claw/skills/，手写 YAML Frontmatter 解析（第10讲已实现）
+│   │   ├── PromptComposer.java            # 动态拼装 System Prompt（极简内核+AGENTS.md+Skills）（第10讲已实现）
 │   │   ├── ContextManager.java            # 上下文生命周期管理
-│   │   ├── PromptComposer.java            # 动态拼装系统提示（读取 AGENTS.md）
 │   │   ├── Compactor.java                 # Token 阶梯压缩策略
 │   │   └── EventInjector.java             # 运行时干预提醒注入
 │   │
