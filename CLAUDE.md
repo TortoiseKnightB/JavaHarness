@@ -65,21 +65,19 @@ ClawApplication.main()
   │     ├─ BashTool(workDir)         — 30s 超时 + 错误自纠错 + 8000 截断
   │     └─ EditFileTool(workDir)     — 4 级模糊匹配（L1 精确→L2 换行→L3 Trim→L4 逐行去缩进）
   │
-  └─ 4. AgentEngine(provider, registry, workDir, enableThinking)
-        ├─ 内部创建 PromptComposer(workDir)  // 【第10讲】动态组装 System Prompt
-        └─ eng.run(userPrompt, reporter)
+  └─ 4. AgentEngine(provider, registry, enableThinking)
+        ├─ 引擎无状态：WorkDir 跟随 Session，composer 按需创建
+        └─ eng.run(session, reporter)  // Session 承载历史 + 工作区绑定
 ```
 
 ### Two-Stage ReAct 主循环
 
 ```
-AgentEngine.run(userPrompt, reporter)
+AgentEngine.run(session, reporter)
   │
-  ├─ 初始化 contextHistory = [composer.build(), User消息]
-  │     └─ composer.build() 三板斧：
-  │         1. CORE_KERNEL — 极简内核：身份 + 6 条红线纪律
-  │         2. AGENTS.md   — 项目专属规范（可选，不存在则跳过）
-  │         3. SkillLoader.loadAll() — .claw/skills/ 下所有 SKILL.md（可选）
+  ├─ composer = new PromptComposer(session.workDir())  // 每次 run 动态创建
+  ├─ workingMemory = session.getWorkingMemory(6)       // 截取最近 6 条（第11讲）
+  ├─ contextHistory = [composer.build()] + workingMemory
   │
   └─ while(true) {  // Main Loop
         │
@@ -87,19 +85,19 @@ AgentEngine.run(userPrompt, reporter)
         │
         ├─ [Phase 1: Thinking] — 仅当 enableThinking=true 时执行
         │     thinkResp = provider.generate(contextHistory, /* tools=空列表 */)
-        │     contextHistory.add(thinkResp)  // 🧠 思考轨迹写入上下文
+        │     contextHistory.add(thinkResp) → session.append(thinkResp)
         │
         ├─ [Phase 2: Action]
         │     actionResp = provider.generate(contextHistory, availableTools)
-        │     contextHistory.add(actionResp)
+        │     contextHistory.add(actionResp) → session.append(actionResp)
         │
-        ├─ if (!actionResp.hasToolCalls()) → break  // 模型认为任务完成
+        ├─ if (!actionResp.hasToolCalls()) → break
         │
         └─ Fork-Join 并发执行：
-              observationMsgs = new Message[toolCalls.size()]  // 预分配数组
+              observationMsgs = new Message[toolCalls.size()]
               CompletableFuture.runAsync(registry.execute, VIRTUAL_THREADS) ×N
-              CompletableFuture.allOf(futures).join()  // 等待全部完成
-              按原始顺序追加到 contextHistory  // 数组天然保序
+              CompletableFuture.allOf(futures).join()
+              按原始顺序追加到 contextHistory → session.append(observationMsgs)
       }
 ```
 
@@ -157,7 +155,9 @@ ClawApplication
   ├─ 4. 用户在飞书聊天中 @机器人 发消息
   │     └─ 飞书服务器通过 WebSocket 推送消息事件 → FeishuBot
   │           ├─ 解析 chatId + 文本内容
-  │           └─ 虚拟线程异步 → AgentEngine.run
+  │           ├─ sessionMgr.getOrCreate(chatId, workDir)  // Session 物理隔离
+  │           ├─ session.append(new Message(Role.USER, text))
+  │           └─ 虚拟线程异步 → AgentEngine.run(session, reporter)
   │                 ├─ FeishuReporter.onThinking()  → 飞书发送 "🧠 正在深度思考..."
   │                 ├─ FeishuReporter.onToolCall()  → 飞书发送 "🛠️ 调用工具..."
   │                 ├─ FeishuReporter.onToolResult() → 飞书发送 "✅/❌ 执行结果"
@@ -194,6 +194,25 @@ System Prompt 不应是硬编码的字符串常量，而应是**模块化"编译
 - **状态外部化**：将易变的业务规范剥离出核心引擎代码，交由人类在工作区以文件形式维护
 - **静默降级**：AGENTS.md 或 skills 目录不存在时，引擎正常工作，不抛异常
 - **渐进式暴露**：当前实现全量加载，后续演进方向——启动时只放技能元数据，大模型按需调用工具精确加载正文
+
+### Session 管理与 Working Memory（第11讲）
+
+**核心问题**：多端并发下，如果共用一个 `contextHistory`，不同用户的指令和数据会混杂在一起，导致大模型"精神分裂"。同时，长程对话的历史会无限膨胀，打爆 Context Window。
+
+**解决方案**：引入 `Session` 实体 + `SessionManager` + Working Memory 截取。
+
+**Session 实体**：
+- `id`：会话唯一标识（飞书 chatId、终端 session ID 等）
+- `workDir`：会话绑定的工作区目录（WorkDir 跟随 Session，引擎不再持有 WorkDir）
+- `history`：完整历史消息列表
+- `mu`：`ReentrantReadWriteLock`，保证并发安全
+
+**孤儿 ToolResult 防线**：`getWorkingMemory` 截取后，如果首条消息是 `Role=USER + toolCallId≠null`（工具结果但其 ToolCall 已被截断丢弃），循环丢弃直到遇到正常消息，否则大模型 API 报 400 Bad Request。
+
+**设计哲学**：
+- **物理隔离**：每个用户/群聊分配独立 Session，历史绝不交叉
+- **记忆截断**：只将最近 6 条发给大模型，控制 Token 消耗
+- **生命周期解耦**：引擎不持有状态，Session 可随时休眠/唤醒
 
 ### 工具防御机制
 
@@ -311,7 +330,8 @@ java-tiny-claw/
 │   │   └── ToolDefinition.java            # 工具元信息（供模型理解工具有什么用）
 │   │
 │   ├── engine/                            # === 核心引擎层 ===
-│   │   ├── AgentEngine.java               # 引擎核心：Two-Stage ReAct + Fork-Join 并发工具分发（已实现）
+│   │   ├── AgentEngine.java               # 引擎核心：Two-Stage ReAct + Fork-Join 并发工具分发（第11讲重构：无状态）
+│   │   ├── Session.java                   # 会话实体 + SessionManager + Working Memory 截取（第11讲已实现）
 │   │   ├── Reporter.java                  # I/O 解耦接口：onThinking/onToolCall/onToolResult/onMessage（已实现）
 │   │   ├── ConsoleReporter.java           # CLI 模式终端输出实现（已实现）
 │   │   └── FeishuReporter.java            # 飞书模式：调用 REST API 发消息（已实现）
