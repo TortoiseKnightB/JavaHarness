@@ -131,6 +131,6 @@ public class BashTool implements Tool {
 
         return outputStr;
 
-        // todo：超时和内存溢出控制存在问题
+        // todo：超时和内存溢出控制存在问题，如果bash开启外部服务会阻塞本线程
     }
 }

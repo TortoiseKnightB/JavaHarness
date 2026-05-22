@@ -60,14 +60,14 @@ public class ClawApplication {
         r.register(new EditFileTool(workDir));
 
         // 4. 实例化核心引擎（无状态，WorkDir 跟随 Session）
-        AgentEngine eng = new AgentEngine(p, r, engineConfig.enableThinking());
+        AgentEngine eng = new AgentEngine(p, r, engineConfig.enableThinking(), engineConfig.planMode());
 
         // 5. 根据配置的模式启动
         String mode = serverConfig.mode();
         if ("feishu".equals(mode)) {
             startFeishuMode(eng, config.feishu(), workDir);
-        } else if ("oom".equals(mode)) {
-            startOomTestMode(eng, workDir);
+        } else if ("plan".equals(mode)) {
+            startPlanModeTest(eng, workDir);
         } else {
             startCliMode(eng, workDir);
         }
@@ -90,38 +90,31 @@ public class ClawApplication {
     }
 
     /**
-     * Compactor OOM 测试模式：生成大文件后让 Agent 读取，验证压缩器介入。
-     * <p>
-     * 对应文章"运行与实战测试：逼迫 Agent 发生内存溢出"。
+     * Plan Mode 测试：阶段1 下发长程任务让 Agent 生成 PLAN.md/TODO.md，
+     * 阶段2 模拟重启验证断点续传。
      */
-    private static void startOomTestMode(AgentEngine eng, String workDir) {
-        log.info("启动模式: OOM (Context Compaction 压力测试)");
-
-        // 生成一个 2000 行的重复日志文件，模拟 OOM 场景
-        String bigText = "这是一段极其冗长的、无意义的服务器报错日志信息，用来模拟 OOM 场景。\n";
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < 2000; i++) {
-            sb.append(bigText);
-        }
-        try {
-            Files.writeString(Path.of(workDir, "mock_log.txt"), sb.toString());
-            log.info("[OOM] 已生成 mock_log.txt (约 {} 字符)", sb.length());
-        } catch (IOException e) {
-            log.error("[OOM] mock_log.txt 生成失败: {}", e.getMessage());
-            return;
-        }
-
-        Session session = new Session("test_oom_protection_001", workDir);
+    private static void startPlanModeTest(AgentEngine eng, String workDir) {
+        log.info("启动模式: Plan (文件系统状态外部化 + 断点续传测试)");
         ConsoleReporter reporter = new ConsoleReporter();
 
-        String prompt = """
-                请帮我执行以下三个步骤：
-                1. 使用 bash 执行 echo "开始排查日志"
-                2. 使用 read_file 工具读取当前目录下的巨大文件 mock_log.txt
-                3. 使用 bash 执行 date 命令获取当前时间，并告诉我任务全部完成。""";
+        // ===== 阶段 1：排雷与自我管理（生成 PLAN.md / TODO.md） =====
+        log.info("\n===== 阶段 1：下发长程任务 =====");
+        Session session1 = new Session("plan_demo_001", workDir);
+        String task = """
+                请帮我搭建一个完整的 Java Web 项目骨架，要求：
+                1. 使用 Maven 管理依赖
+                2. 采用分层架构：controller、service、dao
+                3. 创建一个 User 实体（id、name、email）和基本的 CRUD 接口
+                4. 补充对应的单元测试
+                5. 工作目录在 ./workspace 下""";
+        session1.append(new Message(Role.USER, task));
+        eng.run(session1, reporter);
 
-        session.append(new Message(Role.USER, prompt));
-        eng.run(session, reporter);
+//        // ===== 阶段 2：模拟"重启"，验证断点续传 =====
+//        log.info("\n===== 阶段 2：模拟重启，验证断点续传 =====");
+//        Session session2 = new Session("plan_demo_001_restart", workDir);
+//        session2.append(new Message(Role.USER, "系统刚刚重启，请继续执行未完成的任务。"));
+//        eng.run(session2, reporter);
     }
 
     /**

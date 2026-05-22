@@ -227,6 +227,19 @@ Working Memory 按条数截断但不限制单条体积——一条 `read_file` �
 | Working Memory（保护区内） | Head-Tail Truncation | 单条 >1000 字符 → 保留前 500 + 后 500，中间截断 |
 | 远期 Assistant 冗长推理 | 折叠 | 替换为 `"...[早期的推理思考过程已折叠]..."` |
 
+### Plan Mode 与状态外部化（第13讲）
+
+摒弃代码内的复杂状态机，直接教大模型用文件系统管理长程任务。Agent 已有 read_file/write_file/edit_file，将"大脑状态"写成本地文件。
+
+| 文件 | 用途 |
+|------|------|
+| `PLAN.md` | 宏观架构设计、技术选型、全局约束 |
+| `TODO.md` | 细粒度待办清单（`- [ ]`），完成一步立即打勾 `- [x]` |
+
+**Plan Mode 开关**：`PromptComposer` 新增 `planMode` 参数，开启时 System Prompt 注入三步微代码——STEP 1 环境嗅探（分支 A 全新创建 / 分支 B 断点续传）、STEP 2 单步打勾（严禁攒到最后）、STEP 3 迷失自救（read TODO.md）。`AgentEngine` 新增 `planMode` 字段，`EngineConfig` 新增 `planMode` 组件，`application.yml` 中 `plan-mode` 配置。
+
+**慢思考 vs Plan Mode**：正交——Plan Mode 管战略方向（别跑偏），Thinking Phase 管微观推理（别跳步）。
+
 ### 工具防御机制
 
 **ReadFileTool / WriteFileTool — 路径穿越防护**：
@@ -413,7 +426,8 @@ java-tiny-claw/
 ## 已知问题
 
 - **ClaudeProvider**：代码已实现 Anthropic Messages API 格式翻译，但智谱 `/v4/messages` 端点返回 404，需确认正确的 Claude 兼容端点地址。`application.yml` 中 Claude 配置已注释备用。
-- **BashTool**：超时和内存溢出控制存在问题，当前 `Process.waitFor(30, TimeUnit.SECONDS)` 后 `destroyForcibly()` 可能无法彻底清理子进程，output 字符串无限累积也有 OOM 风险。后续需要加入输出流式读取 + 总长度硬限制 + 进程树彻底销毁。
+- **ClaudeProvider**：代码已实现 Anthropic Messages API 格式翻译，智谱 `/v4/messages` 端点返回 404。
+- **BashTool 进程阻塞**：`reader.readLine()` 在 `process.waitFor(30, SECONDS)` 之前执行。当大模型启动常驻服务（如 `java -jar server.jar`）时，stdout 管道不关闭，`readLine()` 永久阻塞 → 虚拟线程死锁 → 引擎卡死。30s 超时在读取完成后才触发，无法防御此场景。后续需将输出读取与超时等待放入独立的虚拟线程中竞速。
 
 ## Maven 依赖（最小集）
 

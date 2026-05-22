@@ -14,6 +14,7 @@ import java.nio.file.Paths;
  * 负责根据工作区环境动态生成 System Prompt。
  * <p>
  * 组装策略遵循 OpenClaw 的分层加载哲学，像搭积木一样将极简内核、AGENTS.md 和 Skills 动态拼接。
+ * 支持可选的 Plan Mode 开关，开启时注入文件系统状态外部化规范。
  */
 public class PromptComposer {
 
@@ -37,9 +38,40 @@ public class PromptComposer {
             """;
 
     /**
+     * Plan Mode 开启时注入的长程任务与状态外部化强制规范
+     */
+    private static final String PLAN_MODE_PROMPT = """
+            \n# 长程任务与状态外部化强制规范 (Plan Mode: ON)
+
+            !!! 警告：本模式下，你绝对不能依赖自己的短期记忆。你必须将所有的架构思路和执行进度持久化到物理文件中。 !!!
+
+            当你收到一条新指令被唤醒时，你必须、且只能按照以下【绝对顺序】执行你的动作：
+
+            **[STEP 1: 强制环境嗅探 (Bootstrapping)]**
+            - 收到指令后，你必须第一时间使用 bash (如: `ls -la`) 检查当前工作区根目录下是否已经存在 `PLAN.md` 和 `TODO.md`。
+            - **分支 A (全新任务)**：如果这两个文件不存在，说明这是一个全新的任务。你必须使用 write_file 依次创建它们：
+              1. 先创建 `PLAN.md`，写下你的理解、架构设计、技术选型。
+              2. 再创建 `TODO.md`，拆解出具体的可执行步骤（使用标准的 Markdown Checkbox 格式，如 `- [ ] 步骤1`）。
+            - **分支 B (断点续传/任务唤醒)**：如果这两个文件已经存在，**绝对不要覆盖它们！** 这意味着系统刚刚重启，或者人类接管了进度。你必须立即使用 read_file 仔细阅读 `PLAN.md` 了解全局目标，并阅读 `TODO.md` 寻找第一个未被打勾的 `- [ ]` 任务，从那里直接继续干活。
+
+            **[STEP 2: 严格的单步执行与实时打勾]**
+            - 开始执行 `TODO.md` 中未完成的任务。
+            - **强制约束**：每当你通过 write_file 或 bash 真正完成了一个子任务后，你**必须立即停下来**，优先使用 edit_file 工具，将 `TODO.md` 中对应的行修改为 `- [x]`。
+            - 绝对不允许"一口气写完所有代码最后再打勾"。做完一步，必须打勾一步！
+
+            **[STEP 3: 迷失时的自救]**
+            - 如果你在执行中遇到了报错，或者不知道下一步该干嘛了，立即使用 read_file 重新读取 `TODO.md` 确认自己的位置。
+            """;
+
+    /**
      * 工作区物理边界目录
      */
     private final String workDir;
+
+    /**
+     * 计划模式开关：开启时注入 PLAN.md / TODO.md 文件系统状态外部化规范
+     */
+    private final boolean planMode;
 
     /**
      * 技能加载器
@@ -47,17 +79,19 @@ public class PromptComposer {
     private final SkillLoader skillLoader;
 
     /**
-     * @param workDir 工作区根目录路径
+     * @param workDir  工作区根目录路径
+     * @param planMode 是否开启计划模式
      */
-    public PromptComposer(String workDir) {
+    public PromptComposer(String workDir, boolean planMode) {
         this.workDir = workDir;
+        this.planMode = planMode;
         this.skillLoader = new SkillLoader(workDir);
     }
 
     /**
      * 组装并返回一条完整的 Role.SYSTEM 消息。
      * <p>
-     * 三步组装：1) 极简内核 → 2) AGENTS.md（可选）→ 3) Skills（可选）。
+     * 三（或四）步组装：1) 极简内核 → 2) Plan Mode 规范（可选）→ 3) AGENTS.md（可选）→ 4) Skills（可选）。
      *
      * @return 包含最终 System Prompt 的 Message 对象
      */
@@ -67,7 +101,12 @@ public class PromptComposer {
         // 1. 注入极简内核
         promptBuilder.append(CORE_KERNEL);
 
-        // 2. 外部化状态：加载项目专属规范 (AGENTS.md)
+        // 2. 如果开启了 Plan Mode，注入长程任务与状态外部化规范
+        if (planMode) {
+            promptBuilder.append(PLAN_MODE_PROMPT);
+        }
+
+        // 3. 外部化状态：加载项目专属规范 (AGENTS.md)
         Path agentsMDPath = Paths.get(workDir, "AGENTS.md");
         try {
             String content = Files.readString(agentsMDPath);
@@ -80,7 +119,7 @@ public class PromptComposer {
             log.debug("[Composer] AGENTS.md 未找到，跳过: {}", e.getMessage());
         }
 
-        // 3. 动态加载技能外挂 (Skills)
+        // 4. 动态加载技能外挂 (Skills)
         String skillsContent = skillLoader.loadAll();
         if (!skillsContent.isEmpty()) {
             promptBuilder.append(skillsContent);

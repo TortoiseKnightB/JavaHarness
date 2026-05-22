@@ -69,6 +69,11 @@ public class AgentEngine {
     private final boolean enableThinking;
 
     /**
+     * 计划模式开关：开启时 System Prompt 注入 PLAN.md / TODO.md 状态外部化规范
+     */
+    private final boolean planMode;
+
+    /**
      * 上下文压缩器：防止大模型发生 Context Window OOM
      */
     private final Compactor compactor;
@@ -77,11 +82,13 @@ public class AgentEngine {
      * @param provider       大模型适配器
      * @param registry       工具注册表
      * @param enableThinking 是否开启慢思考模式（Two-Stage ReAct）
+     * @param planMode       是否开启计划模式（注入 PLAN.md / TODO.md 状态外部化规范）
      */
-    public AgentEngine(LLMProvider provider, ToolRegistry registry, boolean enableThinking) {
+    public AgentEngine(LLMProvider provider, ToolRegistry registry, boolean enableThinking, boolean planMode) {
         this.provider = provider;
         this.registry = registry;
         this.enableThinking = enableThinking;
+        this.planMode = planMode;
         this.compactor = new Compactor(COMPACTOR_MAX_CHARS, COMPACTOR_RETAIN_MSGS);
     }
 
@@ -105,7 +112,7 @@ public class AgentEngine {
             List<ToolDefinition> availableTools = registry.getAvailableTools();
 
             // 1. 【上下文组装】: System Prompt + 截取最近的 N 条消息作为 Working Memory
-            PromptComposer composer = new PromptComposer(session.workDir());
+            PromptComposer composer = new PromptComposer(session.workDir(), planMode);
             Message systemMsg = composer.build();
 
             List<Message> workingMemory = session.getWorkingMemory(WORKING_MEMORY_LIMIT);
