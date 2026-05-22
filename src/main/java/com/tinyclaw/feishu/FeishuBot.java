@@ -8,6 +8,10 @@ import com.lark.oapi.service.im.v1.model.P2MessageReceiveV1;
 import com.tinyclaw.config.FeishuConfig;
 import com.tinyclaw.engine.AgentEngine;
 import com.tinyclaw.engine.FeishuReporter;
+import com.tinyclaw.engine.Session;
+import com.tinyclaw.engine.Session.SessionManager;
+import com.tinyclaw.model.Message;
+import com.tinyclaw.model.Role;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -37,13 +41,30 @@ public class FeishuBot {
     private final FeishuConfig config;
 
     /**
+     * 工作区物理边界目录（所有飞书会话共享同一工作区）
+     */
+    private final String workDir;
+
+    /**
+     * 全局会话管理器，每个飞书 chatId 对应一个独立 Session
+     */
+    private final SessionManager sessionMgr;
+
+    /**
      * 飞书 REST API 客户端（用于发送消息）
      */
     private final Client restClient;
 
-    public FeishuBot(AgentEngine engine, FeishuConfig config) {
+    /**
+     * @param engine  Agent 核心引擎
+     * @param config  飞书 SDK 配置
+     * @param workDir 工作区根目录
+     */
+    public FeishuBot(AgentEngine engine, FeishuConfig config, String workDir) {
         this.engine = engine;
         this.config = config;
+        this.workDir = workDir;
+        this.sessionMgr = new SessionManager();
         this.restClient = Client.newBuilder(config.appId(), config.appSecret()).build();
     }
 
@@ -85,13 +106,15 @@ public class FeishuBot {
     }
 
     /**
-     * 为指定聊天窗口实例化 Reporter 并启动引擎。
+     * 为指定聊天窗口获取或创建 Session，追加用户消息后启动引擎。
      */
     private void handleAgentRun(String chatId, String prompt) {
+        Session session = sessionMgr.getOrCreate(chatId, workDir);
+        session.append(new Message(Role.USER, prompt));
         FeishuReporter reporter = new FeishuReporter(restClient, chatId);
         log.info("[Feishu] 启动 Agent 任务，chatId: {}, prompt: {}", chatId, prompt);
         try {
-            engine.run(prompt, reporter);
+            engine.run(session, reporter);
         } catch (Exception e) {
             log.error("[Feishu] Agent 运行崩溃: {}", e.getMessage(), e);
             reporter.onMessage("❌ Agent 运行崩溃: " + e.getMessage());

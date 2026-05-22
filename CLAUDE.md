@@ -8,6 +8,7 @@
 - **基础设施只取所需**：用 Maven 管依赖，不用 Spring Boot（避免 DI 容器成为新的"黑盒框架"）
 - **Java 21**：利用 record、sealed class、Virtual Threads 等现代特性
 - **变量声明**：禁止使用 `var`，所有局部变量必须使用明确的类型声明
+- **时间日期类型**：使用 `java.time.LocalDateTime` 表示时间，使用 `java.time.LocalDate` 表示日期，禁止使用 `java.time.Instant`
 - **配置管理**：`application.yml`（kebab-case 命名），通过 `ConfigLoader` 加载，支持 `${ENV_VAR:default}` 占位符
 
 ## Javadoc 注释规范

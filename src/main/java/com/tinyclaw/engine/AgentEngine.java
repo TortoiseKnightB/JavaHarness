@@ -23,6 +23,8 @@ import java.util.concurrent.Executors;
  * 只负责维护上下文时间线，严格执行 Two-Stage ReAct 范式：
  * Phase 1 剥夺工具强制规划，Phase 2 恢复工具精准执行。
  * 工具分发采用 Fork-Join 并发模式：预分配数组 + CompletableFuture + 虚拟线程，无锁线程安全且结果天然保序。
+ * <p>
+ * 引擎本身无状态——WorkDir 跟随 Session 走，所有上下文持久化由 Session 负责。
  */
 public class AgentEngine {
 
@@ -36,6 +38,11 @@ public class AgentEngine {
     private static final Executor VIRTUAL_THREADS = Executors.newVirtualThreadPerTaskExecutor();
 
     /**
+     * 短期工作记忆的消息条数限制
+     */
+    private static final int WORKING_MEMORY_LIMIT = 6;
+
+    /**
      * 大模型适配器：负责与底层模型 API 通信
      */
     private final LLMProvider provider;
@@ -46,60 +53,49 @@ public class AgentEngine {
     private final ToolRegistry registry;
 
     /**
-     * 工作区物理边界：借鉴 OpenClaw 理念，
-     * Agent 必须像普通开发者一样受限于某个具体的项目目录。
-     */
-    private final String workDir;
-
-    /**
      * 慢思考模式开关：复杂任务打开以强制两阶段规划，简单任务关闭以节省 Token
      */
     private final boolean enableThinking;
 
     /**
-     * 提示词组裝器：根据工作区环境动态生成 System Prompt
-     */
-    private final PromptComposer composer;
-
-    /**
      * @param provider       大模型适配器
      * @param registry       工具注册表
-     * @param workDir        工作区物理边界目录
      * @param enableThinking 是否开启慢思考模式（Two-Stage ReAct）
      */
-    public AgentEngine(LLMProvider provider, ToolRegistry registry, String workDir, boolean enableThinking) {
+    public AgentEngine(LLMProvider provider, ToolRegistry registry, boolean enableThinking) {
         this.provider = provider;
         this.registry = registry;
-        this.workDir = workDir;
         this.enableThinking = enableThinking;
-        this.composer = new PromptComposer(workDir);
     }
 
     /**
-     * 启动 Agent 的生命周期，执行 Two-Stage ReAct 循环直到任务完成。
+     * 从 Session 中恢复记忆，执行 ReAct 循环直到本轮任务完成。
+     * <p>
+     * 调用方需先将用户消息通过 {@link Session#append(Message...)} 追加到 Session 中，
+     * 再调用本方法。引擎从 Session 的工作区中动态组装 System Prompt，从 Session 中提取
+     * Working Memory 作为上下文历史。
      *
-     * @param userPrompt 用户输入的任务描述
-     * @param reporter   输出报告器，为 null 时退化为 ConsoleReporter
+     * @param session  会话实例，承载完整历史与工作区绑定
+     * @param reporter 输出报告器，为 null 时退化为 ConsoleReporter
      */
-    public void run(String userPrompt, Reporter reporter) {
+    public void run(Session session, Reporter reporter) {
         final Reporter rep = reporter != null ? reporter : new ConsoleReporter();
-        log.info("[Engine] 引擎启动，锁定工作区: {}", workDir);
+        log.info("[Engine] 唤醒会话 [{}]，锁定工作区: {}", session.id(), session.workDir());
         log.info("[Engine] 慢思考模式 (Thinking Phase): {}", enableThinking);
 
-        // 1. 初始化会话的 Context (上下文内存)
-        List<Message> contextHistory = new ArrayList<>();
-        contextHistory.add(composer.build());
-        contextHistory.add(new Message(Role.USER, userPrompt));
-
-        int turnCount = 0;
-
-        // 2. The Main Loop: 心跳开始 (Two-Stage ReAct 循环)
         while (true) {
-            turnCount++;
-            log.info("\n========== [Turn {}] 开始 ==========", turnCount);
-
             // 获取当前挂载的所有工具定义
             List<ToolDefinition> availableTools = registry.getAvailableTools();
+
+            // 1. 【上下文组装】: System Prompt + 截取最近的 N 条消息作为 Working Memory
+            PromptComposer composer = new PromptComposer(session.workDir());
+            Message systemMsg = composer.build();
+
+            List<Message> workingMemory = session.getWorkingMemory(WORKING_MEMORY_LIMIT);
+
+            List<Message> contextHistory = new ArrayList<>();
+            contextHistory.add(systemMsg);
+            contextHistory.addAll(workingMemory);
 
             // ====================================================================
             // Phase 1: 慢思考阶段 (Thinking) - 剥夺工具，强制规划
@@ -108,14 +104,12 @@ public class AgentEngine {
                 log.info("[Engine][Phase 1] 剥夺工具访问权，强制进入慢思考与规划阶段...");
                 rep.onThinking();
 
-                // 核心机制：传入空的工具列表！
-                // 大模型看不到任何 JSON Schema，被迫只能输出纯文本的思考过程。
                 Message thinkResp = provider.generate(contextHistory, List.of());
 
-                // 如果模型输出了思考过程，将其作为 Assistant 消息追加到上下文中
                 if (thinkResp.content() != null && !thinkResp.content().isEmpty()) {
                     rep.onMessage("🧠 [内部思考 Trace]: " + thinkResp.content());
                     contextHistory.add(thinkResp);
+                    session.append(thinkResp);
                 }
             }
 
@@ -124,10 +118,9 @@ public class AgentEngine {
             // ====================================================================
             log.info("[Engine][Phase 2] 恢复工具挂载，等待模型采取行动...");
 
-            // 此时的 contextHistory 中已包含 Thinking Trace。
-            // 模型会顺着自己的逻辑，结合恢复的 availableTools 发起精准的工具调用。
             Message actionResp = provider.generate(contextHistory, availableTools);
             contextHistory.add(actionResp);
+            session.append(actionResp);
 
             // 如果模型回复了纯文本，通过 Reporter 输出（对外回复）
             if (actionResp.content() != null && !actionResp.content().isEmpty()) {
@@ -138,9 +131,9 @@ public class AgentEngine {
             // 退出与执行逻辑
             // ====================================================================
 
-            // 3. 退出条件判断：无工具调用 → 任务完成
+            // 3. 退出条件判断：无工具调用 → 本轮任务完成，挂起等待人类下一条指令
             if (!actionResp.hasToolCalls()) {
-                log.info("[Engine] 模型未请求调用工具，任务宣告完成。");
+                log.info("[Engine] 模型未请求调用工具，本轮任务完成。");
                 break;
             }
 
@@ -176,6 +169,9 @@ public class AgentEngine {
             CompletableFuture.allOf(futures).join();
 
             log.info("[Engine] 所有并发工具执行完毕，开始聚合观察结果 (Observation)...");
+
+            // 持久化到 Session，开启下一轮的复盘与推理
+            session.append(observationMsgs);
 
             // 按原始顺序追加到上下文时间线（预分配数组天然保序）
             for (Message obs : observationMsgs) {

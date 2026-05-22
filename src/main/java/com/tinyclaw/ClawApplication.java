@@ -7,7 +7,10 @@ import com.tinyclaw.config.ProviderConfig;
 import com.tinyclaw.config.ServerConfig;
 import com.tinyclaw.engine.AgentEngine;
 import com.tinyclaw.engine.ConsoleReporter;
+import com.tinyclaw.engine.Session;
 import com.tinyclaw.feishu.FeishuBot;
+import com.tinyclaw.model.Message;
+import com.tinyclaw.model.Role;
 import com.tinyclaw.config.FeishuConfig;
 import com.tinyclaw.provider.ClaudeProvider;
 import com.tinyclaw.provider.LLMProvider;
@@ -48,26 +51,28 @@ public class ClawApplication {
         r.register(new BashTool(workDir));
         r.register(new EditFileTool(workDir));
 
-        // 4. 实例化核心引擎
-        AgentEngine eng = new AgentEngine(p, r, workDir, engineConfig.enableThinking());
+        // 4. 实例化核心引擎（无状态，WorkDir 跟随 Session）
+        AgentEngine eng = new AgentEngine(p, r, engineConfig.enableThinking());
 
         // 5. 根据配置的模式启动
         String mode = serverConfig.mode();
         if ("feishu".equals(mode)) {
-            startFeishuMode(eng, config.feishu());
+            startFeishuMode(eng, config.feishu(), workDir);
         } else {
-            startCliMode(eng);
+            startCliMode(eng, workDir);
         }
     }
 
     /**
      * CLI 模式：从命令行执行一次任务。
      */
-    private static void startCliMode(AgentEngine eng) {
+    private static void startCliMode(AgentEngine eng, String workDir) {
         log.info("启动模式: CLI");
         try {
-            eng.run("我需要在当前目录下新建一个 ping.java，提供一个简单的 http ping 接口。 写完之后，帮我把代码用 git 提交一下。",
-                    new ConsoleReporter());
+            Session session = new Session("cli", workDir);
+            session.append(new Message(Role.USER,
+                    "我需要在当前目录下新建一个 ping.java，提供一个简单的 http ping 接口。 写完之后，帮我把代码用 git 提交一下。"));
+            eng.run(session, new ConsoleReporter());
         } catch (ProviderException e) {
             log.error("引擎运行崩溃: {}", e.getMessage(), e);
             System.exit(1);
@@ -77,9 +82,9 @@ public class ClawApplication {
     /**
      * 飞书模式：建立 WebSocket 长连接，挂起主线程等待消息。
      */
-    private static void startFeishuMode(AgentEngine eng, FeishuConfig feishuConfig) {
+    private static void startFeishuMode(AgentEngine eng, FeishuConfig feishuConfig, String workDir) {
         log.info("启动模式: Feishu (WebSocket 长连接)");
-        FeishuBot bot = new FeishuBot(eng, feishuConfig);
+        FeishuBot bot = new FeishuBot(eng, feishuConfig, workDir);
         bot.start();  // 阻塞直到连接断开
     }
 
