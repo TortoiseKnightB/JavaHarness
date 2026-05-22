@@ -214,6 +214,19 @@ System Prompt 不应是硬编码的字符串常量，而应是**模块化"编译
 - **记忆截断**：只将最近 6 条发给大模型，控制 Token 消耗
 - **生命周期解耦**：引擎不持有状态，Session 可随时休眠/唤醒
 
+### Context Compaction 上下文压缩（第12讲）
+
+Working Memory 按条数截断但不限制单条体积——一条 `read_file` 误读 1MB 日志就能打爆 Context Window（400 Bad Request）。不能简单删除超长消息（会导致 ToolCall→ToolResult 逻辑链断裂），必须采用**阶梯降级**：丢弃冗余数据，但保住意图和逻辑链。
+
+**双重降级防线**：
+
+| 消息区域 | 策略 | 操作 |
+|----------|------|------|
+| System Prompt | 永远保留 | 不动 |
+| 远期历史（保护区之外） | Observation Masking | ToolResult 内容 >200 字符 → 替换为占位文本；ToolCall 不动 |
+| Working Memory（保护区内） | Head-Tail Truncation | 单条 >1000 字符 → 保留前 500 + 后 500，中间截断 |
+| 远期 Assistant 冗长推理 | 折叠 | 替换为 `"...[早期的推理思考过程已折叠]..."` |
+
 ### 工具防御机制
 
 **ReadFileTool / WriteFileTool — 路径穿越防护**：
@@ -356,7 +369,7 @@ java-tiny-claw/
 │   │   ├── SkillLoader.java                # 扫描 .claw/skills/，手写 YAML Frontmatter 解析（第10讲已实现）
 │   │   ├── PromptComposer.java            # 动态拼装 System Prompt（极简内核+AGENTS.md+Skills）（第10讲已实现）
 │   │   ├── ContextManager.java            # 上下文生命周期管理
-│   │   ├── Compactor.java                 # Token 阶梯压缩策略
+│   │   ├── Compactor.java                 # 上下文压缩：双重降级防线（第12讲已实现）
 │   │   └── EventInjector.java             # 运行时干预提醒注入
 │   │
 │   ├── tools/                             # === 工具与执行层 ===

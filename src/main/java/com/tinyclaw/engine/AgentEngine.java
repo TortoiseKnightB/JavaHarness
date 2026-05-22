@@ -1,5 +1,6 @@
 package com.tinyclaw.engine;
 
+import com.tinyclaw.context.Compactor;
 import com.tinyclaw.context.PromptComposer;
 import com.tinyclaw.model.Message;
 import com.tinyclaw.model.Role;
@@ -38,9 +39,19 @@ public class AgentEngine {
     private static final Executor VIRTUAL_THREADS = Executors.newVirtualThreadPerTaskExecutor();
 
     /**
-     * 短期工作记忆的消息条数限制
+     * 从 Session 中提取的上下文窗口大小（给压缩器充足的判断空间）
      */
-    private static final int WORKING_MEMORY_LIMIT = 6;
+    private static final int WORKING_MEMORY_LIMIT = 20;
+
+    /**
+     * Compactor 保护区大小：最近 N 条消息免于全量掩码，仅做 Head-Tail 截断
+     */
+    private static final int COMPACTOR_RETAIN_MSGS = 6;
+
+    /**
+     * 上下文压缩器水位线（字符数），便于测试设为积极阈值
+     */
+    private static final int COMPACTOR_MAX_CHARS = 3000;
 
     /**
      * 大模型适配器：负责与底层模型 API 通信
@@ -58,6 +69,11 @@ public class AgentEngine {
     private final boolean enableThinking;
 
     /**
+     * 上下文压缩器：防止大模型发生 Context Window OOM
+     */
+    private final Compactor compactor;
+
+    /**
      * @param provider       大模型适配器
      * @param registry       工具注册表
      * @param enableThinking 是否开启慢思考模式（Two-Stage ReAct）
@@ -66,6 +82,7 @@ public class AgentEngine {
         this.provider = provider;
         this.registry = registry;
         this.enableThinking = enableThinking;
+        this.compactor = new Compactor(COMPACTOR_MAX_CHARS, COMPACTOR_RETAIN_MSGS);
     }
 
     /**
@@ -97,6 +114,10 @@ public class AgentEngine {
             contextHistory.add(systemMsg);
             contextHistory.addAll(workingMemory);
 
+            // 2. 【核心注入点】: 在向 Provider 发起推理前，过一遍内存压缩器
+            // 无论带出了多少上下文，如果字符总数超标，早期日志将被掩码化，超大日志将被掐头去尾
+            List<Message> compactedContext = compactor.compact(contextHistory);
+
             // ====================================================================
             // Phase 1: 慢思考阶段 (Thinking) - 剥夺工具，强制规划
             // ====================================================================
@@ -104,11 +125,13 @@ public class AgentEngine {
                 log.info("[Engine][Phase 1] 剥夺工具访问权，强制进入慢思考与规划阶段...");
                 rep.onThinking();
 
-                Message thinkResp = provider.generate(contextHistory, List.of());
+                Message thinkResp = provider.generate(compactedContext, List.of());
 
                 if (thinkResp.content() != null && !thinkResp.content().isEmpty()) {
                     rep.onMessage("🧠 [内部思考 Trace]: " + thinkResp.content());
-                    contextHistory.add(thinkResp);
+                    compactedContext = new ArrayList<>(compactedContext);
+                    compactedContext.add(thinkResp);
+                    // 写入 Session 的是全量真实响应，不受 Compact 影响
                     session.append(thinkResp);
                 }
             }
@@ -118,8 +141,9 @@ public class AgentEngine {
             // ====================================================================
             log.info("[Engine][Phase 2] 恢复工具挂载，等待模型采取行动...");
 
-            Message actionResp = provider.generate(contextHistory, availableTools);
-            contextHistory.add(actionResp);
+            Message actionResp = provider.generate(compactedContext, availableTools);
+            compactedContext = new ArrayList<>(compactedContext);
+            compactedContext.add(actionResp);
             session.append(actionResp);
 
             // 如果模型回复了纯文本，通过 Reporter 输出（对外回复）
@@ -170,12 +194,12 @@ public class AgentEngine {
 
             log.info("[Engine] 所有并发工具执行完毕，开始聚合观察结果 (Observation)...");
 
-            // 持久化到 Session，开启下一轮的复盘与推理
+            // 持久化到 Session，开启下一轮的复盘与推理（全量原始数据，不受压缩影响）
             session.append(observationMsgs);
 
-            // 按原始顺序追加到上下文时间线（预分配数组天然保序）
+            // 按原始顺序追加到临时上下文时间线
             for (Message obs : observationMsgs) {
-                contextHistory.add(obs);
+                compactedContext.add(obs);
             }
 
             // 循环回到开头，模型将带着新加入的 Observation 继续它的下一轮思考...

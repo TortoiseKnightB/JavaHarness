@@ -66,8 +66,8 @@ public class ClawApplication {
         String mode = serverConfig.mode();
         if ("feishu".equals(mode)) {
             startFeishuMode(eng, config.feishu(), workDir);
-        } else if ("test".equals(mode)) {
-            startTestMode(eng);
+        } else if ("oom".equals(mode)) {
+            startOomTestMode(eng, workDir);
         } else {
             startCliMode(eng, workDir);
         }
@@ -90,64 +90,47 @@ public class ClawApplication {
     }
 
     /**
+     * Compactor OOM 测试模式：生成大文件后让 Agent 读取，验证压缩器介入。
+     * <p>
+     * 对应文章"运行与实战测试：逼迫 Agent 发生内存溢出"。
+     */
+    private static void startOomTestMode(AgentEngine eng, String workDir) {
+        log.info("启动模式: OOM (Context Compaction 压力测试)");
+
+        // 生成一个 2000 行的重复日志文件，模拟 OOM 场景
+        String bigText = "这是一段极其冗长的、无意义的服务器报错日志信息，用来模拟 OOM 场景。\n";
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < 2000; i++) {
+            sb.append(bigText);
+        }
+        try {
+            Files.writeString(Path.of(workDir, "mock_log.txt"), sb.toString());
+            log.info("[OOM] 已生成 mock_log.txt (约 {} 字符)", sb.length());
+        } catch (IOException e) {
+            log.error("[OOM] mock_log.txt 生成失败: {}", e.getMessage());
+            return;
+        }
+
+        Session session = new Session("test_oom_protection_001", workDir);
+        ConsoleReporter reporter = new ConsoleReporter();
+
+        String prompt = """
+                请帮我执行以下三个步骤：
+                1. 使用 bash 执行 echo "开始排查日志"
+                2. 使用 read_file 工具读取当前目录下的巨大文件 mock_log.txt
+                3. 使用 bash 执行 date 命令获取当前时间，并告诉我任务全部完成。""";
+
+        session.append(new Message(Role.USER, prompt));
+        eng.run(session, reporter);
+    }
+
+    /**
      * 飞书模式：建立 WebSocket 长连接，挂起主线程等待消息。
      */
     private static void startFeishuMode(AgentEngine eng, FeishuConfig feishuConfig, String workDir) {
         log.info("启动模式: Feishu (WebSocket 长连接)");
         FeishuBot bot = new FeishuBot(eng, feishuConfig, workDir);
         bot.start();  // 阻塞直到连接断开
-    }
-
-    /**
-     * 测试模式：模拟并发场景，验证 Session 物理隔离与 Working Memory 截断。
-     * <p>
-     * 模拟两个飞书群同时请求同一个 AgentEngine：
-     * Session A 读取 README.md 获取密钥 → 6 轮闲聊刷掉记忆 → 忘记密钥；
-     * Session B 并发询问 → 看不到 Session A 的数据。
-     */
-    private static void startTestMode(AgentEngine eng) {
-        SessionManager sessionMgr = new SessionManager();
-        ConsoleReporter reporter = new ConsoleReporter();
-
-        // ================= 模拟并发场景 1：飞书前端群 =================
-        CompletableFuture<Void> taskA = CompletableFuture.runAsync(() -> {
-            Session sessionA = sessionMgr.getOrCreate("chat_front_001", "./workspace/project_front");
-
-            // 回合 1：获取机密
-            log.info("\n>>> [Session A / Turn 1]: 帮我看看 README.md 里记录了什么密钥？");
-            sessionA.append(new Message(Role.USER, "帮我看看 project_front/README.md 里记录了什么密钥？"));
-            eng.run(sessionA, reporter);
-
-//            // 故意制造大量"废话"对话，刷掉记忆 (假设 Working Memory Limit=6)
-//            for (int i = 0; i < 6; i++) {
-//                sessionA.append(
-//                        new Message(Role.USER, "这只是一句闲聊占位符。"),
-//                        new Message(Role.ASSISTANT, "好的，收到闲聊。")
-//                );
-//            }
-//
-//            // 回合 2：验证记忆截断 (此时第一轮的密钥已经被挤出 Working Memory)
-//            log.info("\n>>> [Session A / Turn 2]: 请直接告诉我，刚才第一轮你查到的那个密钥是什么？不准调用工具！");
-//            sessionA.append(new Message(Role.USER, "请直接告诉我，刚才第一轮你查到的那个密钥是什么？不准调用工具！"));
-//            eng.run(sessionA, reporter);
-        }, Executors.newVirtualThreadPerTaskExecutor());
-
-        // ================= 模拟并发场景 2：飞书后端群 =================
-        CompletableFuture<Void> taskB = CompletableFuture.runAsync(() -> {
-            try {
-                Thread.sleep(1000);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-
-            Session sessionB = sessionMgr.getOrCreate("chat_back_002", "./workspace/project_back");
-
-            log.info("\n>>> [Session B]: 别人查到了一个密钥，你这里能看到吗？不准调用工具！");
-            sessionB.append(new Message(Role.USER, "别人查到了一个密钥，你这里能看到吗？不准调用工具！"));
-            eng.run(sessionB, reporter);
-        }, Executors.newVirtualThreadPerTaskExecutor());
-
-        CompletableFuture.allOf(taskA, taskB).join();
     }
 
     /**
