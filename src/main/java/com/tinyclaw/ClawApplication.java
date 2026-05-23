@@ -66,8 +66,8 @@ public class ClawApplication {
         String mode = serverConfig.mode();
         if ("feishu".equals(mode)) {
             startFeishuMode(eng, config.feishu(), workDir);
-        } else if ("plan".equals(mode)) {
-            startPlanModeTest(eng, workDir);
+        } else if ("recovery".equals(mode)) {
+            startRecoveryTest(eng, workDir);
         } else {
             startCliMode(eng, workDir);
         }
@@ -90,31 +90,56 @@ public class ClawApplication {
     }
 
     /**
-     * Plan Mode 测试：阶段1 下发长程任务让 Agent 生成 PLAN.md/TODO.md，
-     * 阶段2 模拟重启验证断点续传。
+     * Recovery 测试：创建 auth.go 靶机文件，用包含错误 old_text 的指令诱导 Agent 失败，
+     * 验证 RecoveryManager 注入锦囊后 Agent 自愈闭环。
+     * <p>
+     * Turn 1：Agent 直接用错误的 old_text 调用 edit_file → 失败 → 注入锦囊
+     * Turn 2：Agent 按锦囊指示先 read_file → 获取准确内容 → edit_file 成功。
      */
-    private static void startPlanModeTest(AgentEngine eng, String workDir) {
-        log.info("启动模式: Plan (文件系统状态外部化 + 断点续传测试)");
+    private static void startRecoveryTest(AgentEngine eng, String workDir) {
+        log.info("启动模式: Recovery (错误自愈测试)");
+
+        // 准备"靶机"代码：auth.go
+        String authCode = """
+                package main
+
+                func login(user string) bool {
+                    // 检查用户名
+                    if user == "admin" {
+                        return true
+                    }
+                    return false
+                }
+                """;
+        try {
+            Files.writeString(Path.of(workDir, "auth.go"), authCode);
+            log.info("[Recovery] 已创建 auth.go");
+        } catch (IOException e) {
+            log.error("[Recovery] auth.go 创建失败: {}", e.getMessage());
+            return;
+        }
+
+        Session session = new Session("test_recovery_001", workDir);
         ConsoleReporter reporter = new ConsoleReporter();
 
-        // ===== 阶段 1：排雷与自我管理（生成 PLAN.md / TODO.md） =====
-        log.info("\n===== 阶段 1：下发长程任务 =====");
-        Session session1 = new Session("plan_demo_001", workDir);
-        String task = """
-                请帮我搭建一个完整的 Java Web 项目骨架，要求：
-                1. 使用 Maven 管理依赖
-                2. 采用分层架构：controller、service、dao
-                3. 创建一个 User 实体（id、name、email）和基本的 CRUD 接口
-                4. 补充对应的单元测试
-                5. 工作目录在 ./workspace 下""";
-        session1.append(new Message(Role.USER, task));
-        eng.run(session1, reporter);
+        // 陷阱指令：故意在 old_text 中加了一句不存在的注释 "// 鉴权入口函数"，
+        // 诱导 edit_file 因 old_text 不匹配而失败
+        String prompt = """
+                我当前目录下有一个 auth.go 文件。
+                请修改 auth.go 中的 login 函数。
+                你可以不用读取源文件，请直接使用 edit_file 工具替换下面的代码块，将判断条件改为同时允许"admin"、"root"和"guest"三种用户登录：
 
-//        // ===== 阶段 2：模拟"重启"，验证断点续传 =====
-//        log.info("\n===== 阶段 2：模拟重启，验证断点续传 =====");
-//        Session session2 = new Session("plan_demo_001_restart", workDir);
-//        session2.append(new Message(Role.USER, "系统刚刚重启，请继续执行未完成的任务。"));
-//        eng.run(session2, reporter);
+                // 鉴权入口函数
+                func login(user string) bool {
+                    // 检查用户名
+                    if user == "admin" {
+                        return true
+                    }
+                    return false
+                }
+                """;
+        session.append(new Message(Role.USER, prompt));
+        eng.run(session, reporter);
     }
 
     /**

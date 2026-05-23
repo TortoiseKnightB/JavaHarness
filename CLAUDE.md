@@ -240,6 +240,16 @@ Working Memory 按条数截断但不限制单条体积——一条 `read_file` �
 
 **慢思考 vs Plan Mode**：正交——Plan Mode 管战略方向（别跑偏），Thinking Phase 管微观推理（别跳步）。
 
+### Error Recovery 错误自愈（第14讲）
+
+大模型面对报错时倾向于"道歉后放弃"或"盲目重试相同的错误操作"。
+
+**核心认知**：报错不应只是陈述，而应是行动指南。工具执行失败时，基于当前工具和错误类型，向 Context 注入带有强烈倾向性的恢复建议（锦囊妙计），错误变为触发排障 SOP 的扳机。
+
+**RecoveryManager** 匹配规则（基于 `String.contains` 关键字，生产环境建议改用 POSIX 标准错误码）：
+
+**注入地点**：`AgentEngine` 中 Fork-Join 的工具执行 lambda 内，`result.isError()` 时调用 `recoveryMgr.analyzeAndInject()` 替换 `observationContent`。无匹配时返回原错误。
+
 ### 工具防御机制
 
 **ReadFileTool / WriteFileTool — 路径穿越防护**：
@@ -383,6 +393,7 @@ java-tiny-claw/
 │   │   ├── PromptComposer.java            # 动态拼装 System Prompt（极简内核+AGENTS.md+Skills）（第10讲已实现）
 │   │   ├── ContextManager.java            # 上下文生命周期管理
 │   │   ├── Compactor.java                 # 上下文压缩：双重降级防线（第12讲已实现）
+│   │   ├── RecoveryManager.java            # 错误自愈：锦囊提示注入（第14讲已实现）
 │   │   └── EventInjector.java             # 运行时干预提醒注入
 │   │
 │   ├── tools/                             # === 工具与执行层 ===
@@ -425,7 +436,6 @@ java-tiny-claw/
 
 ## 已知问题
 
-- **ClaudeProvider**：代码已实现 Anthropic Messages API 格式翻译，但智谱 `/v4/messages` 端点返回 404，需确认正确的 Claude 兼容端点地址。`application.yml` 中 Claude 配置已注释备用。
 - **ClaudeProvider**：代码已实现 Anthropic Messages API 格式翻译，智谱 `/v4/messages` 端点返回 404。
 - **BashTool 进程阻塞**：`reader.readLine()` 在 `process.waitFor(30, SECONDS)` 之前执行。当大模型启动常驻服务（如 `java -jar server.jar`）时，stdout 管道不关闭，`readLine()` 永久阻塞 → 虚拟线程死锁 → 引擎卡死。30s 超时在读取完成后才触发，无法防御此场景。后续需将输出读取与超时等待放入独立的虚拟线程中竞速。
 

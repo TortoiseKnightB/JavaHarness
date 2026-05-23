@@ -2,6 +2,7 @@ package com.tinyclaw.engine;
 
 import com.tinyclaw.context.Compactor;
 import com.tinyclaw.context.PromptComposer;
+import com.tinyclaw.context.RecoveryManager;
 import com.tinyclaw.model.Message;
 import com.tinyclaw.model.Role;
 import com.tinyclaw.model.ToolCall;
@@ -79,6 +80,11 @@ public class AgentEngine {
     private final Compactor compactor;
 
     /**
+     * 错误自愈管理器：工具执行失败时注入恢复建议
+     */
+    private final RecoveryManager recoveryMgr;
+
+    /**
      * @param provider       大模型适配器
      * @param registry       工具注册表
      * @param enableThinking 是否开启慢思考模式（Two-Stage ReAct）
@@ -90,6 +96,7 @@ public class AgentEngine {
         this.enableThinking = enableThinking;
         this.planMode = planMode;
         this.compactor = new Compactor(COMPACTOR_MAX_CHARS, COMPACTOR_RETAIN_MSGS);
+        this.recoveryMgr = new RecoveryManager();
     }
 
     /**
@@ -186,10 +193,16 @@ public class AgentEngine {
 
                     rep.onToolResult(call.name(), result.output(), result.isError());
 
+                    // 错误自愈：如果工具执行失败，注入恢复建议
+                    String observationContent = result.output();
+                    if (result.isError()) {
+                        observationContent = recoveryMgr.analyzeAndInject(call.name(), result.output());
+                    }
+
                     // 线程安全：每个虚拟线程操作预分配数组的不同索引，无需加锁
                     observationMsgs[idx] = new Message(
                             Role.USER,
-                            result.output(),
+                            observationContent,
                             List.of(),
                             call.id()
                     );
