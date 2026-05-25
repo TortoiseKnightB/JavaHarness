@@ -85,6 +85,11 @@ public class AgentEngine {
     private final RecoveryManager recoveryMgr;
 
     /**
+     * 运行时提醒注入器：监控死循环并在连续失败时注入强力打断指令
+     */
+    private final ReminderInjector injector;
+
+    /**
      * @param provider       大模型适配器
      * @param registry       工具注册表
      * @param enableThinking 是否开启慢思考模式（Two-Stage ReAct）
@@ -97,6 +102,7 @@ public class AgentEngine {
         this.planMode = planMode;
         this.compactor = new Compactor(COMPACTOR_MAX_CHARS, COMPACTOR_RETAIN_MSGS);
         this.recoveryMgr = new RecoveryManager();
+        this.injector = new ReminderInjector();
     }
 
     /**
@@ -181,6 +187,7 @@ public class AgentEngine {
 
             // 预分配固定长度的数组，每个协程通过专属索引并发写入，无需加锁
             Message[] observationMsgs = new Message[toolCalls.size()];
+            ToolResult[] toolResults = new ToolResult[toolCalls.size()];
             CompletableFuture<?>[] futures = new CompletableFuture[toolCalls.size()];
 
             for (int i = 0; i < toolCalls.size(); i++) {
@@ -190,6 +197,7 @@ public class AgentEngine {
                     rep.onToolCall(call.name(), call.arguments().toString());
 
                     ToolResult result = registry.execute(call);
+                    toolResults[idx] = result;
 
                     rep.onToolResult(call.name(), result.output(), result.isError());
 
@@ -220,6 +228,17 @@ public class AgentEngine {
             // 按原始顺序追加到临时上下文时间线
             for (Message obs : observationMsgs) {
                 compactedContext.add(obs);
+            }
+
+            // 【核心防线】：在准备进入下一轮之前，进行死循环探测！
+            // (在真实的工业级架构中，如果并发调用了多个工具，我们可以逐个分析或仅分析报错的那个。这里简化为取第一个)
+            ToolCall firstCall = toolCalls.get(0);
+            ToolResult firstResult = toolResults[0];
+            Message reminderMsg = injector.checkAndInject(firstCall, firstResult);
+            if (reminderMsg != null) {
+                // 如果触发了干预规则，将这条严厉的提醒作为 User 消息，强制追加到 Session 最末尾
+                // 大模型在下一轮被唤醒时，第一眼就会看到这句话，从而打破局部执念
+                session.append(reminderMsg);
             }
 
             // 循环回到开头，模型将带着新加入的 Observation 继续它的下一轮思考...

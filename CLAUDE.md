@@ -95,9 +95,13 @@ AgentEngine.run(session, reporter)
         │
         └─ Fork-Join 并发执行：
               observationMsgs = new Message[toolCalls.size()]
+              toolResults = new ToolResult[toolCalls.size()]
               CompletableFuture.runAsync(registry.execute, VIRTUAL_THREADS) ×N
               CompletableFuture.allOf(futures).join()
               按原始顺序追加到 contextHistory → session.append(observationMsgs)
+              │
+              └─ 【第15讲】ReminderInjector.checkAndInject(toolCalls[0], toolResults[0])
+                    └─ 连续 3 次失败 → 以 Role.USER 注入 [SYSTEM REMINDER 警告]
       }
 ```
 
@@ -250,7 +254,23 @@ Working Memory 按条数截断但不限制单条体积——一条 `read_file` �
 
 **注入地点**：`AgentEngine` 中 Fork-Join 的工具执行 lambda 内，`result.isError()` 时调用 `recoveryMgr.analyzeAndInject()` 替换 `observationContent`。无匹配时返回原错误。
 
-### 工具防御机制
+### System Reminders 运行时提醒机制（第15讲）
+
+大模型即使配备了 Error Recovery，仍会陷入 **Doom Loop（死循环）／Exploration Spiral（探索螺旋）**——连续用相同参数反复重试一个已失败的操作。
+
+**破局之道**：在每轮 LLM 推理的前一刻（Point of Decision），将高优先级引导指令**伪装成最新一条 User Message**注入上下文最末端，利用 Recency Bias 本身来打破 Recency Bias。
+
+**ReminderInjector**（`engine/ReminderInjector.java`）：
+
+| 条件 | 行为 |
+|------|------|
+| 工具执行成功 | 清空所有失败计数器（Agent 已找到正确路径） |
+| 工具执行失败 | 指纹累加，`Map.merge()` 线程安全 |
+| 连续 ≥3 次相同指纹失败 | 以 `Role.USER` 注入 `[SYSTEM REMINDER 警告]`（最高近因权重） |
+
+**注入地点**：`AgentEngine` 的 Main Loop 中，`session.append(observationMsgs)` 之后、下一轮循环开始之前。取第一个 ToolCall 的调用信息作为分析样本。
+
+**已知局限**：精确参数哈希会被模型的"小聪明"绕过（路径尾部加空格、改用相对路径等），后续可引入参数正则化预处理来提升泛化匹配能力。
 
 **ReadFileTool / WriteFileTool — 路径穿越防护**：
 

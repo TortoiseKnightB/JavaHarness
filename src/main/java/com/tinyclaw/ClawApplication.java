@@ -30,8 +30,6 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.Executors;
 
 public class ClawApplication {
 
@@ -66,8 +64,8 @@ public class ClawApplication {
         String mode = serverConfig.mode();
         if ("feishu".equals(mode)) {
             startFeishuMode(eng, config.feishu(), workDir);
-        } else if ("recovery".equals(mode)) {
-            startRecoveryTest(eng, workDir);
+        }  else if ("doomloop".equals(mode)) {
+            startDoomLoopTest(eng, workDir);
         } else {
             startCliMode(eng, workDir);
         }
@@ -90,53 +88,24 @@ public class ClawApplication {
     }
 
     /**
-     * Recovery 测试：创建 auth.go 靶机文件，用包含错误 old_text 的指令诱导 Agent 失败，
-     * 验证 RecoveryManager 注入锦囊后 Agent 自愈闭环。
+     * Doom Loop 测试：逼迫 Agent 陷入死胡同，验证 ReminderInjector 触发死循环干预。
      * <p>
-     * Turn 1：Agent 直接用错误的 old_text 调用 edit_file → 失败 → 注入锦囊
-     * Turn 2：Agent 按锦囊指示先 read_file → 获取准确内容 → edit_file 成功。
+     * 让 Agent 读取一个不存在的 secret_key.txt，并用误导性指令要求它"不要改变参数直接重试"。
+     * 前 3 次 Agent 会连续用相同参数调用 read_file 失败 → 第 3 次触发 ReminderInjector
+     * → 注入强力打断指令 → Agent 在第 4 轮改变策略，跳出死循环。
      */
-    private static void startRecoveryTest(AgentEngine eng, String workDir) {
-        log.info("启动模式: Recovery (错误自愈测试)");
+    private static void startDoomLoopTest(AgentEngine eng, String workDir) {
+        log.info("启动模式: Doom Loop (死循环干预测试)");
+        log.warn(">>> 🚀 启动死循环干预测试...");
 
-        // 准备"靶机"代码：auth.go
-        String authCode = """
-                package main
-
-                func login(user string) bool {
-                    // 检查用户名
-                    if user == "admin" {
-                        return true
-                    }
-                    return false
-                }
-                """;
-        try {
-            Files.writeString(Path.of(workDir, "auth.go"), authCode);
-            log.info("[Recovery] 已创建 auth.go");
-        } catch (IOException e) {
-            log.error("[Recovery] auth.go 创建失败: {}", e.getMessage());
-            return;
-        }
-
-        Session session = new Session("test_recovery_001", workDir);
+        Session session = new Session("test_doom_loop_001", workDir);
         ConsoleReporter reporter = new ConsoleReporter();
 
-        // 陷阱指令：故意在 old_text 中加了一句不存在的注释 "// 鉴权入口函数"，
-        // 诱导 edit_file 因 old_text 不匹配而失败
+        // 陷阱指令：诱导 Agent 反复用相同参数重试一个必定失败的操作
         String prompt = """
-                我当前目录下有一个 auth.go 文件。
-                请修改 auth.go 中的 login 函数。
-                你可以不用读取源文件，请直接使用 edit_file 工具替换下面的代码块，将判断条件改为同时允许"admin"、"root"和"guest"三种用户登录：
-
-                // 鉴权入口函数
-                func login(user string) bool {
-                    // 检查用户名
-                    if user == "admin" {
-                        return true
-                    }
-                    return false
-                }
+                帮我读取当前目录下的 secret_key.txt。
+                注意：我们的文件系统现在非常不稳定，经常报 File Not Found。
+                如果报错了，请你【千万不要改变参数】，直接原样再次调用 read_file 尝试，直到成功或连续重试 5 次为止。
                 """;
         session.append(new Message(Role.USER, prompt));
         eng.run(session, reporter);
