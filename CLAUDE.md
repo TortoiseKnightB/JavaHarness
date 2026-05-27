@@ -272,6 +272,27 @@ Working Memory 按条数截断但不限制单条体积——一条 `read_file` �
 
 **已知局限**：精确参数哈希会被模型的"小聪明"绕过（路径尾部加空格、改用相对路径等），后续可引入参数正则化预处理来提升泛化匹配能力。
 
+### Middleware 防御纵深与飞书人工审批（第16讲）
+
+当 Agent 接入飞书群并操作远端服务器时，必须在底层执行节点构筑物理防线。
+
+**核心设计**：在 `ToolRegistry` 层注入 Middleware 拦截链，不修改任何底层工具代码，不污染引擎核心。高危操作时通过 `CompletableFuture.join()` 挂起虚拟线程，飞书用户回复 approve/reject 口令后 `future.complete()` 唤醒。
+
+**ApprovalManager**（`feishu/ApprovalManager.java`）：
+
+| 方法 | 说明 |
+|------|------|
+| `waitForApproval(taskId, toolName, args, reporter)` | 发送飞书审批消息，`future.join()` 阻塞当前线程 |
+| `resolveApproval(taskId, allowed, reason)` | 飞书回调触发，`future.complete()` 唤醒阻塞线程 |
+| `isDangerousCommand(toolName, args)` | 正则匹配高危操作（`rm -r`、`sudo`、`drop`、`>*.java`） |
+
+**FeishuBot 改造**：
+- WebSocket 回调中拦截 `approve {taskId}` / `reject {taskId}` 口令，调用 `ApprovalManager.resolveApproval()`
+
+**注入地点**：`ClawApplication.startFeishuMode()`，创建 `FeishuBot` 后以 lambda 注册到 `registry.use()`，闭包捕获 `bot.reporter()` 引用。
+
+**已知局限**：`isDangerousCommand()` 黑名单正则硬编码在源码中，应改造为读取外部配置文件并支持热更新。
+
 **ReadFileTool / WriteFileTool — 路径穿越防护**：
 
 ```
@@ -418,11 +439,9 @@ java-tiny-claw/
 │   │
 │   ├── tools/                             # === 工具与执行层 ===
 │   │   ├── Tool.java                      # 工具接口：name() + definition() + execute(JsonNode)（已实现）
-│   │   ├── ToolRegistry.java              # 注册与分发接口（新增 register 方法）（已实现）
-│   │   ├── ToolRegistryImpl.java          # Map<String, Tool> 实现 O(1) 路由分发（已实现）
-│   │   ├── ToolMiddleware.java            # 中间件接口（链式）（后续）
-│   │   ├── ToolMiddlewareChain.java       # 中间件链执行器（后续）
-│   │   ├── ApprovalGate.java              # 人类在环审批中间件（后续）
+│   │   ├── ToolRegistry.java              # 注册与分发接口 + use(Middleware) 挂载点（已实现）
+│   │   ├── ToolRegistryImpl.java          # Map O(1) 路由 + Middleware 链拦截（第16讲已实现）
+│   │   ├── ToolMiddleware.java            # 中间件函数接口：String check(ToolCall)（第16讲已实现）
 │   │   └── builtin/
 │   │       ├── ReadFileTool.java           # 文件读取：workDir 注入 + 路径穿越防护 + 8000 截断（已实现）
 │   │       ├── WriteFileTool.java          # 文件写入：路径穿越防护 + 自动创建父目录（已实现）
@@ -434,7 +453,8 @@ java-tiny-claw/
 │   │   └── FileMemoryStore.java           # 读写 TODO.md / PLAN.md / context.md
 │   │
 │   └── feishu/                            # === 飞书集成（已实现） ===
-│       └── FeishuBot.java                 # WebSocket 长连接客户端 + 事件分发（已实现）
+│       ├── FeishuBot.java                 # WebSocket 长连接 + 审批口令拦截（第16讲已实现）
+│       └── ApprovalManager.java           # 审批中枢：CompletableFuture 跨线程信号传递（第16讲已实现）
 │
 ├── src/test/java/com/tinyclaw/           #（待实现）
 │   ├── engine/MainLoopTest.java

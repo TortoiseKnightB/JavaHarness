@@ -84,7 +84,7 @@ public class FeishuReporter implements Reporter {
      *
      * @param text 要发送的消息文本
      */
-    private void sendMsg(String text) {
+    public void sendMsg(String text) {
         try {
             String msgContent = Jsons.DEFAULT.toJson(Map.of("text", text));
             CreateMessageReq req = CreateMessageReq.newBuilder()

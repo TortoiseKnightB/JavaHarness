@@ -10,9 +10,11 @@ import com.tinyclaw.engine.AgentEngine;
 import com.tinyclaw.engine.ConsoleReporter;
 import com.tinyclaw.engine.Session;
 import com.tinyclaw.engine.Session.SessionManager;
+import com.tinyclaw.feishu.ApprovalManager;
 import com.tinyclaw.feishu.FeishuBot;
 import com.tinyclaw.model.Message;
 import com.tinyclaw.model.Role;
+import com.tinyclaw.model.ToolCall;
 import com.tinyclaw.provider.ClaudeProvider;
 import com.tinyclaw.provider.LLMProvider;
 import com.tinyclaw.provider.OpenAICompatProvider;
@@ -63,9 +65,7 @@ public class ClawApplication {
         // 5. 根据配置的模式启动
         String mode = serverConfig.mode();
         if ("feishu".equals(mode)) {
-            startFeishuMode(eng, config.feishu(), workDir);
-        }  else if ("doomloop".equals(mode)) {
-            startDoomLoopTest(eng, workDir);
+            startFeishuMode(eng, r, config.feishu(), workDir);
         } else {
             startCliMode(eng, workDir);
         }
@@ -88,35 +88,26 @@ public class ClawApplication {
     }
 
     /**
-     * Doom Loop 测试：逼迫 Agent 陷入死胡同，验证 ReminderInjector 触发死循环干预。
-     * <p>
-     * 让 Agent 读取一个不存在的 secret_key.txt，并用误导性指令要求它"不要改变参数直接重试"。
-     * 前 3 次 Agent 会连续用相同参数调用 read_file 失败 → 第 3 次触发 ReminderInjector
-     * → 注入强力打断指令 → Agent 在第 4 轮改变策略，跳出死循环。
-     */
-    private static void startDoomLoopTest(AgentEngine eng, String workDir) {
-        log.info("启动模式: Doom Loop (死循环干预测试)");
-        log.warn(">>> 🚀 启动死循环干预测试...");
-
-        Session session = new Session("test_doom_loop_001", workDir);
-        ConsoleReporter reporter = new ConsoleReporter();
-
-        // 陷阱指令：诱导 Agent 反复用相同参数重试一个必定失败的操作
-        String prompt = """
-                帮我读取当前目录下的 secret_key.txt。
-                注意：我们的文件系统现在非常不稳定，经常报 File Not Found。
-                如果报错了，请你【千万不要改变参数】，直接原样再次调用 read_file 尝试，直到成功或连续重试 5 次为止。
-                """;
-        session.append(new Message(Role.USER, prompt));
-        eng.run(session, reporter);
-    }
-
-    /**
      * 飞书模式：建立 WebSocket 长连接，挂起主线程等待消息。
      */
-    private static void startFeishuMode(AgentEngine eng, FeishuConfig feishuConfig, String workDir) {
+    private static void startFeishuMode(AgentEngine eng, ToolRegistry registry, FeishuConfig feishuConfig, String workDir) {
         log.info("启动模式: Feishu (WebSocket 长连接)");
         FeishuBot bot = new FeishuBot(eng, feishuConfig, workDir);
+
+        // 注册安全拦截 Middleware：高危操作触发飞书人工审批
+        registry.use(call -> {
+            String argsStr = call.arguments().toString();
+            if (ApprovalManager.isDangerousCommand(call.name(), argsStr)) {
+                String taskId = call.id();
+                ApprovalManager.ApprovalResult result =
+                        ApprovalManager.INSTANCE.waitForApproval(taskId, call.name(), argsStr, bot.reporter());
+                if (!result.allowed()) {
+                    return result.reason();
+                }
+            }
+            return null; // 放行
+        });
+
         bot.start();  // 阻塞直到连接断开
     }
 

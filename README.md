@@ -238,3 +238,14 @@ my-skill/
 ### 优化方向
 
 精确参数哈希会被模型的"小聪明"绕过（路径尾部加空格、改用相对路径等），后续可引入参数正则化预处理来提升泛化匹配能力。
+
+## Middleware 实现高危命令拦截
+
+在工具执行前进行精准拦截，采用了 Middleware/ Hook 模式。
+
+- 通过空的 `CompletableFuture.join()` 挂起当前线程，向用户飞书app发送消息，等待审批。
+- 收到消息后调用 `CompletableFuture.complete()` 回写空任务的结果，唤醒当前线程，继续执行。
+
+<p align="center">
+        <img src="./imgs/13.webp" width="700"/>
+</p>

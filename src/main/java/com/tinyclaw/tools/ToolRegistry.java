@@ -19,6 +19,15 @@ public interface ToolRegistry {
     void register(Tool tool);
 
     /**
+     * 挂载全局 Middleware 到执行链的最前端。
+     * <p>
+     * Middleware 在工具执行前按注册顺序依次调用，任一返回 false 即拦截本次执行。
+     *
+     * @param middleware 中间件实例
+     */
+    void use(ToolMiddleware middleware);
+
+    /**
      * 返回当前系统挂载的所有可用工具的 Schema，供模型参考。
      *
      * @return 已挂载工具的 ToolDefinition 列表

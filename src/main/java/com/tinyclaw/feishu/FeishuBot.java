@@ -10,6 +10,7 @@ import com.tinyclaw.engine.AgentEngine;
 import com.tinyclaw.engine.FeishuReporter;
 import com.tinyclaw.engine.Session;
 import com.tinyclaw.engine.Session.SessionManager;
+import com.tinyclaw.feishu.ApprovalManager;
 import com.tinyclaw.model.Message;
 import com.tinyclaw.model.Role;
 import org.slf4j.Logger;
@@ -56,6 +57,11 @@ public class FeishuBot {
     private final Client restClient;
 
     /**
+     * 当前正在执行的 Reporter（供 Middleware 获取飞书消息发送能力）
+     */
+    private volatile FeishuReporter reporter;
+
+    /**
      * @param engine  Agent 核心引擎
      * @param config  飞书 SDK 配置
      * @param workDir 工作区根目录
@@ -88,6 +94,20 @@ public class FeishuBot {
                         // 提取文本内容
                         String userText = extractText(content);
 
+                        // 【新增】拦截人工审批的特殊口令
+                        if (userText.startsWith("approve ")) {
+                            String taskId = userText.substring("approve ".length()).trim();
+                            ApprovalManager.INSTANCE.resolveApproval(taskId, true, "人类管理员已批准操作");
+                            log.info("[Feishu] 会话 {}: ✅ 已批准任务 {}", chatId, taskId);
+                            return;
+                        }
+                        if (userText.startsWith("reject ")) {
+                            String taskId = userText.substring("reject ".length()).trim();
+                            ApprovalManager.INSTANCE.resolveApproval(taskId, false, "人类管理员认为该操作存在极高风险，已无情拒绝");
+                            log.info("[Feishu] 会话 {}: 🚫 已拒绝任务 {}", chatId, taskId);
+                            return;
+                        }
+
                         // 异步启动 Agent 任务，不阻塞 WebSocket 回调（3 秒内必须返回）
                         VIRTUAL_THREADS.execute(() -> {
                             handleAgentRun(chatId, userText);
@@ -111,14 +131,26 @@ public class FeishuBot {
     private void handleAgentRun(String chatId, String prompt) {
         Session session = sessionMgr.getOrCreate(chatId, workDir);
         session.append(new Message(Role.USER, prompt));
-        FeishuReporter reporter = new FeishuReporter(restClient, chatId);
+        FeishuReporter r = new FeishuReporter(restClient, chatId);
+        this.reporter = r;
         log.info("[Feishu] 启动 Agent 任务，chatId: {}, prompt: {}", chatId, prompt);
         try {
-            engine.run(session, reporter);
+            engine.run(session, r);
         } catch (Exception e) {
             log.error("[Feishu] Agent 运行崩溃: {}", e.getMessage(), e);
-            reporter.onMessage("❌ Agent 运行崩溃: " + e.getMessage());
+            r.onMessage("❌ Agent 运行崩溃: " + e.getMessage());
+        } finally {
+            this.reporter = null;
         }
+    }
+
+    /**
+     * 返回当前正在执行的 Reporter，供 Middleware 发送审批消息。
+     *
+     * @return 当前 Reporter，可能为 null
+     */
+    public FeishuReporter reporter() {
+        return reporter;
     }
 
     /**
